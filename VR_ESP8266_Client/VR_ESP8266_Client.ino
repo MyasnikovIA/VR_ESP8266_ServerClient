@@ -21,8 +21,8 @@ float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
 bool calibrated = false;
 unsigned long lastTime = 0;
 
-// Относительный ноль
-float zeroPitch = 0, zeroRoll = 0, zeroYaw = 0;
+// Относительный ноль - ИЗМЕНЕНО: теперь это смещение от текущего положения
+float zeroPitchOffset = 0, zeroRollOffset = 0, zeroYawOffset = 0;
 bool zeroSet = false;
 
 // Накопленные углы (без ограничений)
@@ -46,47 +46,33 @@ String deviceId = "VR_Head_" + String(ESP.getChipId());
 // Временная строка для отправки сообщений
 String tempMessage = "";
 
-// Установка относительного нуля
-void setZeroPoint() {
-  zeroPitch = pitch;
-  zeroRoll = roll;
-  zeroYaw = yaw;
+// НОВАЯ ФУНКЦИЯ: Установка текущего положения как нулевой точки
+void setCurrentPositionAsZero() {
+  // Сохраняем текущие абсолютные углы как смещение нуля
+  zeroPitchOffset = accumulatedPitch;
+  zeroRollOffset = accumulatedRoll;
+  zeroYawOffset = accumulatedYaw;
   zeroSet = true;
   
-  // Сбрасываем накопленные углы при установке нуля
-  accumulatedPitch = 0;
-  accumulatedRoll = 0;
-  accumulatedYaw = 0;
-  prevPitch = pitch;
-  prevRoll = roll;
-  prevYaw = yaw;
-  
-  Serial.println("Zero point set");
-  Serial.print("Zero Pitch: "); Serial.print(zeroPitch);
-  Serial.print(" Roll: "); Serial.print(zeroRoll);
-  Serial.print(" Yaw: "); Serial.println(zeroYaw);
+  Serial.println("Current position set as zero point");
+  Serial.print("Zero Pitch Offset: "); Serial.print(zeroPitchOffset, 2);
+  Serial.print(" Roll Offset: "); Serial.print(zeroRollOffset, 2);
+  Serial.print(" Yaw Offset: "); Serial.println(zeroYawOffset, 2);
   
   if (wsConnected) {
-    String message = "ZERO_SET:PITCH:" + String(zeroPitch, 2) + 
-                     ",ROLL:" + String(zeroRoll, 2) + 
-                     ",YAW:" + String(zeroYaw, 2);
+    String message = "ZERO_SET_AT_CURRENT:PITCH:" + String(zeroPitchOffset, 2) + 
+                     ",ROLL:" + String(zeroRollOffset, 2) + 
+                     ",YAW:" + String(zeroYawOffset, 2);
     webSocket.sendTXT(message);
   }
 }
 
 // Сброс относительного нуля
 void resetZeroPoint() {
-  zeroPitch = 0;
-  zeroRoll = 0;
-  zeroYaw = 0;
+  zeroPitchOffset = 0;
+  zeroRollOffset = 0;
+  zeroYawOffset = 0;
   zeroSet = false;
-  
-  accumulatedPitch = 0;
-  accumulatedRoll = 0;
-  accumulatedYaw = 0;
-  prevPitch = pitch;
-  prevRoll = roll;
-  prevYaw = yaw;
   
   Serial.println("Zero point reset");
   if (wsConnected) {
@@ -129,20 +115,20 @@ void updateAccumulatedAngles() {
   prevYaw = yaw;
 }
 
-// Получение относительных углов (без ограничений)
+// Получение относительных углов (относительно зафиксированного нуля) - ИЗМЕНЕНО
 double getRelativePitch() {
-  if (!zeroSet) return accumulatedPitch;
-  return accumulatedPitch - zeroPitch;
+  if (!zeroSet) return 0;
+  return accumulatedPitch - zeroPitchOffset;
 }
 
 double getRelativeRoll() {
-  if (!zeroSet) return accumulatedRoll;
-  return accumulatedRoll - zeroRoll;
+  if (!zeroSet) return 0;
+  return accumulatedRoll - zeroRollOffset;
 }
 
 double getRelativeYaw() {
-  if (!zeroSet) return accumulatedYaw;
-  return accumulatedYaw - zeroYaw;
+  if (!zeroSet) return 0;
+  return accumulatedYaw - zeroYawOffset;
 }
 
 void calibrateSensor() {
@@ -187,7 +173,10 @@ void sendSensorData() {
                 ",ACC_PITCH:" + String(accumulatedPitch, 2) +
                 ",ACC_ROLL:" + String(accumulatedRoll, 2) +
                 ",ACC_YAW:" + String(accumulatedYaw, 2) +
-                ",ZERO_SET:" + String(zeroSet ? "true" : "false");
+                ",ZERO_SET:" + String(zeroSet ? "true" : "false") +
+                ",ZERO_PITCH:" + String(zeroPitchOffset, 2) +
+                ",ZERO_ROLL:" + String(zeroRollOffset, 2) +
+                ",ZERO_YAW:" + String(zeroYawOffset, 2);
   
   webSocket.sendTXT(data);
   lastSentPitch = pitch;
@@ -245,7 +234,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
           sendSensorData();
         }
         else if (message == "SET_ZERO") {
-          setZeroPoint();
+          setCurrentPositionAsZero(); // ИЗМЕНЕНО: используем новую функцию
           tempMessage = "ZERO_POINT_SET:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
@@ -260,6 +249,13 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
           calibrated = false;
           calibrateSensor();
           tempMessage = "FORCE_CALIBRATION_COMPLETE:" + deviceId;
+          webSocket.sendTXT(tempMessage);
+        }
+        // НОВАЯ КОМАНДА: Установить текущее положение как ноль
+        else if (message == "SET_CURRENT_AS_ZERO") {
+          Serial.println("Set current position as zero requested");
+          setCurrentPositionAsZero();
+          tempMessage = "CURRENT_POSITION_SET_AS_ZERO:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
       }
@@ -359,6 +355,7 @@ void setup() {
   Serial.println("Ready to send sensor data to server");
   Serial.println("Available commands from server:");
   Serial.println("  - SET_ZERO: Set current position as zero point");
+  Serial.println("  - SET_CURRENT_AS_ZERO: Set current position as zero point (alternative)");
   Serial.println("  - RESET_ZERO: Reset zero point");
   Serial.println("  - FORCE_CALIBRATE: Force sensor recalibration");
   Serial.println("  - RECALIBRATE: Recalibrate sensor");

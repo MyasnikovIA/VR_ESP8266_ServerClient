@@ -234,6 +234,7 @@
             background: rgba(52, 152, 219, 0.8);
         }
         
+        /* Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT */
         .front { transform: rotateY(0deg) translateZ(100px); background: rgba(231, 76, 60, 0.8); }
         .back { transform: rotateY(180deg) translateZ(100px); background: rgba(52, 152, 219, 0.8); }
         .right { transform: rotateY(90deg) translateZ(100px); background: rgba(46, 204, 113, 0.8); }
@@ -384,10 +385,11 @@
                         <h3>3D Визуализация датчика</h3>
                         <div class="cube-container">
                             <div class="cube">
-                                <div class="face front">FRONT</div>
-                                <div class="face back">BACK</div>
-                                <div class="face right">RIGHT</div>
-                                <div class="face left">LEFT</div>
+                                <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
+                                <div class="face front">LEFT</div>
+                                <div class="face back">RIGHT</div>
+                                <div class="face right">FRONT</div>
+                                <div class="face left">BACK</div>
                                 <div class="face top">TOP</div>
                                 <div class="face bottom">BOTTOM</div>
                             </div>
@@ -537,7 +539,11 @@
                 }
                 // Обработка статусных сообщений
                 else if (data.includes('SERVER:') || 
-                         data.includes('DATA_RECEIVED:')) {
+                         data.includes('DATA_RECEIVED:') ||
+                         data.includes('ZERO_POINT_SET') ||
+                         data.includes('ZERO_POINT_RESET') ||
+                         data.includes('RECALIBRATION_COMPLETE') ||
+                         data.includes('ANGLES_RESET')) {
                     handleStatusMessage(data);
                 }
             } catch (error) {
@@ -603,10 +609,28 @@
         }
         
         function handleStatusMessage(message) {
+            let statusText = '';
+            
             if (message.includes('SERVER:')) {
                 addToLog('Сервер: ' + message.substring(7));
             } else if (message.includes('DATA_RECEIVED:')) {
                 addToLog('Данные получены от: ' + message.substring(14));
+            } else if (message.includes('ZERO_POINT_SET')) {
+                statusText = 'Ноль установлен';
+                showNotification(statusText, 'success');
+            } else if (message.includes('ZERO_POINT_RESET')) {
+                statusText = 'Ноль сброшен';
+                showNotification(statusText, 'info');
+            } else if (message.includes('RECALIBRATION_COMPLETE')) {
+                statusText = 'Калибровка завершена';
+                showNotification(statusText, 'success');
+            } else if (message.includes('ANGLES_RESET')) {
+                statusText = 'Углы сброшены';
+                showNotification(statusText, 'info');
+            }
+            
+            if (statusText) {
+                addToLog('Статус: ' + statusText);
             }
         }
 
@@ -690,10 +714,11 @@
                             <h3>3D Визуализация датчика</h3>
                             <div class="cube-container">
                                 <div class="cube">
-                                    <div class="face front">FRONT</div>
-                                    <div class="face back">BACK</div>
-                                    <div class="face right">RIGHT</div>
-                                    <div class="face left">LEFT</div>
+                                    <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
+                                    <div class="face front">LEFT</div>
+                                    <div class="face back">RIGHT</div>
+                                    <div class="face right">FRONT</div>
+                                    <div class="face left">BACK</div>
                                     <div class="face top">TOP</div>
                                     <div class="face bottom">BOTTOM</div>
                                 </div>
@@ -729,10 +754,11 @@
                         <h3>3D Визуализация датчика</h3>
                         <div class="cube-container">
                             <div class="cube" id="cube-${deviceId}">
-                                <div class="face front">FRONT</div>
-                                <div class="face back">BACK</div>
-                                <div class="face right">RIGHT</div>
-                                <div class="face left">LEFT</div>
+                                <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
+                                <div class="face front">LEFT</div>
+                                <div class="face back">RIGHT</div>
+                                <div class="face right">FRONT</div>
+                                <div class="face left">BACK</div>
                                 <div class="face top">TOP</div>
                                 <div class="face bottom">BOTTOM</div>
                             </div>
@@ -767,10 +793,16 @@
             const pitchElement = document.getElementById(`pitch-${deviceId}`);
             const rollElement = document.getElementById(`roll-${deviceId}`);
             const yawElement = document.getElementById(`yaw-${deviceId}`);
+            const relPitchElement = document.getElementById(`rel-pitch-${deviceId}`);
+            const relRollElement = document.getElementById(`rel-roll-${deviceId}`);
+            const relYawElement = document.getElementById(`rel-yaw-${deviceId}`);
             
             if (pitchElement) pitchElement.textContent = device.currentPitch.toFixed(1) + '°';
             if (rollElement) rollElement.textContent = device.currentRoll.toFixed(1) + '°';
             if (yawElement) yawElement.textContent = device.currentYaw.toFixed(1) + '°';
+            if (relPitchElement) relPitchElement.textContent = device.relPitch.toFixed(2) + '°';
+            if (relRollElement) relRollElement.textContent = device.relRoll.toFixed(2) + '°';
+            if (relYawElement) relYawElement.textContent = device.relYaw.toFixed(2) + '°';
         }
         
         function updateDevicesCount() {
@@ -788,16 +820,30 @@
         function sendCommand(command) {
             if (isConnected && webSocket) {
                 webSocket.send('CMD:' + command);
+                addToLog('Отправлена команда: ' + command);
             }
         }
         
         function sendDeviceCommand(deviceId, command) {
             if (isConnected && webSocket) {
-                webSocket.send('CMD:SEND_TO_DEVICE:' + deviceId + ':' + command);
+                // Формируем команду для конкретного устройства
+                const fullCommand = 'SEND_TO_DEVICE:' + deviceId + ':' + command;
+                webSocket.send('CMD:' + fullCommand);
                 addToLog(`Команда отправлена устройству ${deviceId}: ${command}`);
+                showNotification(`Команда "${getCommandName(command)}" отправлена устройству ${deviceId}`, 'info');
             } else {
                 showNotification('Нет подключения к серверу', 'error');
             }
+        }
+        
+        function getCommandName(command) {
+            const commandNames = {
+                'SET_ZERO': 'Установить ноль',
+                'RECALIBRATE': 'Калибровать',
+                'RESET_ANGLES': 'Сбросить углы',
+                'RESET_ZERO': 'Сбросить ноль'
+            };
+            return commandNames[command] || command;
         }
 
         // Вспомогательные функции

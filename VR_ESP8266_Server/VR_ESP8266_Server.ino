@@ -27,6 +27,9 @@ struct ClientData {
   float accRoll = 0;
   float accYaw = 0;
   bool zeroSet = false;
+  float zeroPitch = 0;    // ДОБАВЛЕНО: нулевые точки
+  float zeroRoll = 0;     // ДОБАВЛЕНО: нулевые точки
+  float zeroYaw = 0;      // ДОБАВЛЕНО: нулевые точки
   unsigned long lastUpdate = 0;
   bool connected = false;
 };
@@ -97,6 +100,10 @@ void updateClientData(String deviceId, String data) {
       else if (key == "ACC_ROLL") clients[clientIndex].accRoll = value.toFloat();
       else if (key == "ACC_YAW") clients[clientIndex].accYaw = value.toFloat();
       else if (key == "ZERO_SET") clients[clientIndex].zeroSet = (value == "true");
+      // ДОБАВЛЕНО: парсинг нулевых точек
+      else if (key == "ZERO_PITCH") clients[clientIndex].zeroPitch = value.toFloat();
+      else if (key == "ZERO_ROLL") clients[clientIndex].zeroRoll = value.toFloat();
+      else if (key == "ZERO_YAW") clients[clientIndex].zeroYaw = value.toFloat();
     }
     
     start = end + 1;
@@ -120,6 +127,10 @@ void updateClientData(String deviceId, String data) {
     else if (key == "ACC_ROLL") clients[clientIndex].accRoll = value.toFloat();
     else if (key == "ACC_YAW") clients[clientIndex].accYaw = value.toFloat();
     else if (key == "ZERO_SET") clients[clientIndex].zeroSet = (value == "true");
+    // ДОБАВЛЕНО: парсинг нулевых точек
+    else if (key == "ZERO_PITCH") clients[clientIndex].zeroPitch = value.toFloat();
+    else if (key == "ZERO_ROLL") clients[clientIndex].zeroRoll = value.toFloat();
+    else if (key == "ZERO_YAW") clients[clientIndex].zeroYaw = value.toFloat();
   }
 }
 
@@ -149,7 +160,11 @@ void broadcastData() {
                    ",ACC_PITCH:" + String(clients[i].accPitch, 2) +
                    ",ACC_ROLL:" + String(clients[i].accRoll, 2) +
                    ",ACC_YAW:" + String(clients[i].accYaw, 2) +
-                   ",ZERO_SET:" + String(clients[i].zeroSet ? "true" : "false");
+                   ",ZERO_SET:" + String(clients[i].zeroSet ? "true" : "false") +
+                   // ДОБАВЛЕНО: отправка нулевых точек
+                   ",ZERO_PITCH:" + String(clients[i].zeroPitch, 2) +
+                   ",ZERO_ROLL:" + String(clients[i].zeroRoll, 2) +
+                   ",ZERO_YAW:" + String(clients[i].zeroYaw, 2);
       webSocket.broadcastTXT(data);
     }
   }
@@ -203,10 +218,54 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             if (colonPos != -1) {
               String targetDevice = deviceCmd.substring(0, colonPos);
               String cmd = deviceCmd.substring(colonPos + 1);
-              // Здесь можно реализовать отправку команд конкретным устройствам
+              
+              // Отправка команды конкретному устройству
               Serial.println("Command for " + targetDevice + ": " + cmd);
+              
+              // Ищем клиента с таким deviceId
+              int clientIndex = findClientIndex(targetDevice);
+              if (clientIndex != -1 && clients[clientIndex].connected) {
+                // Отправляем команду устройству
+                webSocket.sendTXT(num, cmd);
+                Serial.println("Command sent to device: " + cmd);
+                
+                // Подтверждение отправки команды
+                String confirmMsg = "COMMAND_SENT:" + targetDevice + ":" + cmd;
+                webSocket.sendTXT(num, confirmMsg);
+              } else {
+                String errorMsg = "DEVICE_NOT_FOUND:" + targetDevice;
+                webSocket.sendTXT(num, errorMsg);
+              }
             }
           }
+          // Обработка широковещательных команд
+          else if (command.startsWith("BROADCAST:")) {
+            String broadcastCmd = command.substring(10);
+            Serial.println("Broadcast command: " + broadcastCmd);
+            
+            // Отправляем команду всем подключенным клиентам MPU6050
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+              if (clients[i].connected) {
+                webSocket.sendTXT(num, broadcastCmd);
+              }
+            }
+            
+            String confirmMsg = "BROADCAST_SENT:" + broadcastCmd;
+            webSocket.sendTXT(num, confirmMsg);
+          }
+        }
+        // Обработка статусных сообщений от клиентов MPU6050
+        else if (message.startsWith("CLIENT_ID:") || 
+                 message.startsWith("RECALIBRATION_COMPLETE:") ||
+                 message.startsWith("ANGLES_RESET:") ||
+                 message.startsWith("ZERO_POINT_SET:") ||
+                 message.startsWith("ZERO_POINT_RESET:") ||
+                 message.startsWith("FORCE_CALIBRATION_COMPLETE:") ||
+                 message.startsWith("CURRENT_POSITION_SET_AS_ZERO:") ||
+                 message.startsWith("ZERO_SET_AT_CURRENT:")) {
+          // Пересылаем статусные сообщения всем веб-клиентам
+          webSocket.broadcastTXT(message);
+          Serial.println("Status message broadcasted: " + message);
         }
       }
       break;
@@ -278,6 +337,7 @@ void handleRoot() {
   html += "<button class=\"btn-success\" onclick=\"sendCommand('BROADCAST:GET_DATA')\">Request Data from Devices</button>";
   html += "<button class=\"btn-warning\" onclick=\"sendCommand('BROADCAST:RECALIBRATE')\">Recalibrate All Devices</button>";
   html += "<button class=\"btn-danger\" onclick=\"sendCommand('BROADCAST:RESET_ANGLES')\">Reset All Angles</button>";
+  html += "<button class=\"btn-success\" onclick=\"sendCommand('BROADCAST:SET_CURRENT_AS_ZERO')\">Fix Current Position as Zero for All</button>";
   html += "</div>";
   html += "<div id=\"clientsContainer\" class=\"clients-grid\"></div>";
   html += "<div class=\"server-info\">";
@@ -308,6 +368,12 @@ void handleRoot() {
   html += "}";
   html += "else if (event.data.startsWith('DATA_RECEIVED:')) {";
   html += "showNotification('Data received from: ' + event.data.substring(14), 'success');";
+  html += "}";
+  html += "else if (event.data.startsWith('CURRENT_POSITION_SET_AS_ZERO:')) {";
+  html += "showNotification('Current position set as zero for: ' + event.data.substring(28), 'success');";
+  html += "}";
+  html += "else if (event.data.startsWith('ZERO_SET_AT_CURRENT:')) {";
+  html += "showNotification('Zero point set at current position for device', 'success');";
   html += "}";
   html += "};";
   html += "ws.onclose = function() {";
@@ -355,11 +421,14 @@ void handleRoot() {
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Acc Roll:</span><span class=\\\"data-value\\\" id=\\\"accRoll-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Acc Yaw:</span><span class=\\\"data-value\\\" id=\\\"accYaw-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Set:</span><span class=\\\"data-value\\\" id=\\\"zeroSet-${clientId}\\\">false</span></div>";
+  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Pitch:</span><span class=\\\"data-value\\\" id=\\\"zeroPitch-${clientId}\\\">0°</span></div>";
+  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Roll:</span><span class=\\\"data-value\\\" id=\\\"zeroRoll-${clientId}\\\">0°</span></div>";
+  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Yaw:</span><span class=\\\"data-value\\\" id=\\\"zeroYaw-${clientId}\\\">0°</span></div>";
   html += "</div>";
   html += "<div style=\\\"margin-top: 15px;\\\">";
   html += "<button class=\\\"btn-primary\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'GET_DATA')\\\">Get Data</button>";
   html += "<button class=\\\"btn-warning\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RECALIBRATE')\\\">Recalibrate</button>";
-  html += "<button class=\\\"btn-success\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'SET_ZERO')\\\">Set Zero</button>";
+  html += "<button class=\\\"btn-success\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'SET_CURRENT_AS_ZERO')\\\">Fix Current Position as Zero</button>";
   html += "<button class=\\\"btn-danger\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RESET_ZERO')\\\">Reset Zero</button>";
   html += "</div>";
   html += "`;";
@@ -379,6 +448,9 @@ void handleRoot() {
   html += "document.getElementById(`accYaw-${clientId}`).textContent = client.ACC_YAW + '°';";
   html += "document.getElementById(`zeroSet-${clientId}`).textContent = client.ZERO_SET;";
   html += "document.getElementById(`zeroSet-${clientId}`).style.color = client.ZERO_SET === 'true' ? '#28a745' : '#dc3545';";
+  html += "document.getElementById(`zeroPitch-${clientId}`).textContent = client.ZERO_PITCH + '°';";
+  html += "document.getElementById(`zeroRoll-${clientId}`).textContent = client.ZERO_ROLL + '°';";
+  html += "document.getElementById(`zeroYaw-${clientId}`).textContent = client.ZERO_YAW + '°';";
   html += "}";
   html += "function updateConnectedCount() {";
   html += "const count = Object.keys(clients).length;";
@@ -458,6 +530,9 @@ void handleAPIClients() {
       client["accRoll"] = clients[i].accRoll;
       client["accYaw"] = clients[i].accYaw;
       client["zeroSet"] = clients[i].zeroSet;
+      client["zeroPitch"] = clients[i].zeroPitch;    // ДОБАВЛЕНО
+      client["zeroRoll"] = clients[i].zeroRoll;      // ДОБАВЛЕНО
+      client["zeroYaw"] = clients[i].zeroYaw;        // ДОБАВЛЕНО
       client["lastUpdate"] = clients[i].lastUpdate;
     }
   }
@@ -477,7 +552,17 @@ void handleAPICommand() {
     
     if (deviceId != "" && command != "") {
       Serial.println("API Command for " + deviceId + ": " + command);
-      server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Command sent\"}");
+      
+      // Отправляем команду через WebSocket
+      int clientIndex = findClientIndex(deviceId);
+      if (clientIndex != -1 && clients[clientIndex].connected) {
+        // ИСПРАВЛЕНИЕ: создаем переменную для передачи в broadcastTXT
+        String broadcastMessage = "CMD:SEND_TO_DEVICE:" + deviceId + ":" + command;
+        webSocket.broadcastTXT(broadcastMessage);
+        server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Command sent\"}");
+      } else {
+        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found\"}");
+      }
     } else {
       server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters\"}");
     }

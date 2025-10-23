@@ -380,6 +380,9 @@
                         <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value">0.00°</span></div>
                         <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value">0.00°</span></div>
                         <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value">0.00°</span></div>
+                        <div class="data-item"><span class="data-label">Zero Pitch:</span><span class="data-value">N/A</span></div>
+                        <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value">N/A</span></div>
+                        <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value">N/A</span></div>
                     </div>
                     <div class="visualization">
                         <h3>3D Визуализация датчика</h3>
@@ -543,7 +546,9 @@
                          data.includes('ZERO_POINT_SET') ||
                          data.includes('ZERO_POINT_RESET') ||
                          data.includes('RECALIBRATION_COMPLETE') ||
-                         data.includes('ANGLES_RESET')) {
+                         data.includes('ANGLES_RESET') ||
+                         data.includes('CURRENT_POSITION_SET_AS_ZERO') ||
+                         data.includes('ZERO_SET_AT_CURRENT')) {
                     handleStatusMessage(data);
                 }
             } catch (error) {
@@ -577,7 +582,13 @@
                     relPitch: 0,
                     relRoll: 0,
                     relYaw: 0,
+                    accPitch: 0,
+                    accRoll: 0,
+                    accYaw: 0,
                     zeroSet: false,
+                    zeroPitch: 0,  // ДОБАВЛЕНО: нулевые точки
+                    zeroRoll: 0,   // ДОБАВЛЕНО: нулевые точки
+                    zeroYaw: 0,    // ДОБАВЛЕНО: нулевые точки
                     lastUpdate: new Date(),
                     cubeElement: null,
                     targetPitch: 0,
@@ -597,7 +608,15 @@
             if (data.REL_PITCH) devicesData[deviceId].relPitch = parseFloat(data.REL_PITCH);
             if (data.REL_ROLL) devicesData[deviceId].relRoll = parseFloat(data.REL_ROLL);
             if (data.REL_YAW) devicesData[deviceId].relYaw = parseFloat(data.REL_YAW);
+            if (data.ACC_PITCH) devicesData[deviceId].accPitch = parseFloat(data.ACC_PITCH);
+            if (data.ACC_ROLL) devicesData[deviceId].accRoll = parseFloat(data.ACC_ROLL);
+            if (data.ACC_YAW) devicesData[deviceId].accYaw = parseFloat(data.ACC_YAW);
             if (data.ZERO_SET) devicesData[deviceId].zeroSet = (data.ZERO_SET === 'true');
+            // ДОБАВЛЕНО: парсинг нулевых точек
+            if (data.ZERO_PITCH) devicesData[deviceId].zeroPitch = parseFloat(data.ZERO_PITCH);
+            if (data.ZERO_ROLL) devicesData[deviceId].zeroRoll = parseFloat(data.ZERO_ROLL);
+            if (data.ZERO_YAW) devicesData[deviceId].zeroYaw = parseFloat(data.ZERO_YAW);
+            
             devicesData[deviceId].lastUpdate = new Date();
             
             // Запускаем плавную анимацию
@@ -627,6 +646,12 @@
             } else if (message.includes('ANGLES_RESET')) {
                 statusText = 'Углы сброшены';
                 showNotification(statusText, 'info');
+            } else if (message.includes('CURRENT_POSITION_SET_AS_ZERO')) {
+                statusText = 'Текущее положение зафиксировано как ноль';
+                showNotification(statusText, 'success');
+            } else if (message.includes('ZERO_SET_AT_CURRENT')) {
+                statusText = 'Ноль установлен в текущем положении';
+                showNotification(statusText, 'success');
             }
             
             if (statusText) {
@@ -709,6 +734,12 @@
                             <div class="data-item"><span class="data-label">Pitch:</span><span class="data-value">0.0°</span></div>
                             <div class="data-item"><span class="data-label">Roll:</span><span class="data-value">0.0°</span></div>
                             <div class="data-item"><span class="data-label">Yaw:</span><span class="data-value">0.0°</span></div>
+                            <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Zero Pitch:</span><span class="data-value">N/A</span></div>
+                            <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value">N/A</span></div>
+                            <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value">N/A</span></div>
                         </div>
                         <div class="visualization">
                             <h3>3D Визуализация датчика</h3>
@@ -749,6 +780,13 @@
                         <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value" id="rel-pitch-${deviceId}">${device.relPitch.toFixed(2)}°</span></div>
                         <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value" id="rel-roll-${deviceId}">${device.relRoll.toFixed(2)}°</span></div>
                         <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value" id="rel-yaw-${deviceId}">${device.relYaw.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Pitch:</span><span class="data-value" id="acc-pitch-${deviceId}">${device.accPitch.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Roll:</span><span class="data-value" id="acc-roll-${deviceId}">${device.accRoll.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Yaw:</span><span class="data-value" id="acc-yaw-${deviceId}">${device.accYaw.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Zero Set:</span><span class="data-value" id="zero-set-${deviceId}">${device.zeroSet ? 'true' : 'false'}</span></div>
+                        <div class="data-item"><span class="data-label">Zero Pitch:</span><span class="data-value" id="zero-pitch-${deviceId}">${device.zeroPitch ? device.zeroPitch.toFixed(2) + '°' : 'N/A'}</span></div>
+                        <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value" id="zero-roll-${deviceId}">${device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A'}</span></div>
+                        <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value" id="zero-yaw-${deviceId}">${device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A'}</span></div>
                     </div>
                     <div class="visualization">
                         <h3>3D Визуализация датчика</h3>
@@ -766,7 +804,7 @@
                     </div>
                     <div class="device-controls">
                         <button class="btn-primary" onclick="selectDevice('${deviceId}')">Выбрать</button>
-                        <button class="btn-success" onclick="sendDeviceCommand('${deviceId}', 'SET_ZERO')">Установить ноль</button>
+                        <button class="btn-success" onclick="sendDeviceCommand('${deviceId}', 'SET_CURRENT_AS_ZERO')">Зафиксировать положение нуля</button>
                         <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'RECALIBRATE')">Калибровать</button>
                         <button class="btn-danger" onclick="sendDeviceCommand('${deviceId}', 'RESET_ANGLES')">Сбросить</button>
                     </div>
@@ -796,6 +834,13 @@
             const relPitchElement = document.getElementById(`rel-pitch-${deviceId}`);
             const relRollElement = document.getElementById(`rel-roll-${deviceId}`);
             const relYawElement = document.getElementById(`rel-yaw-${deviceId}`);
+            const accPitchElement = document.getElementById(`acc-pitch-${deviceId}`);
+            const accRollElement = document.getElementById(`acc-roll-${deviceId}`);
+            const accYawElement = document.getElementById(`acc-yaw-${deviceId}`);
+            const zeroSetElement = document.getElementById(`zero-set-${deviceId}`);
+            const zeroPitchElement = document.getElementById(`zero-pitch-${deviceId}`);
+            const zeroRollElement = document.getElementById(`zero-roll-${deviceId}`);
+            const zeroYawElement = document.getElementById(`zero-yaw-${deviceId}`);
             
             if (pitchElement) pitchElement.textContent = device.currentPitch.toFixed(1) + '°';
             if (rollElement) rollElement.textContent = device.currentRoll.toFixed(1) + '°';
@@ -803,6 +848,16 @@
             if (relPitchElement) relPitchElement.textContent = device.relPitch.toFixed(2) + '°';
             if (relRollElement) relRollElement.textContent = device.relRoll.toFixed(2) + '°';
             if (relYawElement) relYawElement.textContent = device.relYaw.toFixed(2) + '°';
+            if (accPitchElement) accPitchElement.textContent = device.accPitch.toFixed(2) + '°';
+            if (accRollElement) accRollElement.textContent = device.accRoll.toFixed(2) + '°';
+            if (accYawElement) accYawElement.textContent = device.accYaw.toFixed(2) + '°';
+            if (zeroSetElement) {
+                zeroSetElement.textContent = device.zeroSet ? 'true' : 'false';
+                zeroSetElement.style.color = device.zeroSet ? '#28a745' : '#dc3545';
+            }
+            if (zeroPitchElement) zeroPitchElement.textContent = device.zeroPitch ? device.zeroPitch.toFixed(2) + '°' : 'N/A';
+            if (zeroRollElement) zeroRollElement.textContent = device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A';
+            if (zeroYawElement) zeroYawElement.textContent = device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A';
         }
         
         function updateDevicesCount() {
@@ -839,6 +894,7 @@
         function getCommandName(command) {
             const commandNames = {
                 'SET_ZERO': 'Установить ноль',
+                'SET_CURRENT_AS_ZERO': 'Зафиксировать положение нуля',
                 'RECALIBRATE': 'Калибровать',
                 'RESET_ANGLES': 'Сбросить углы',
                 'RESET_ZERO': 'Сбросить ноль'
