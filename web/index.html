@@ -11,6 +11,7 @@
             --success-color: #27ae60;
             --warning-color: #f39c12;
             --danger-color: #e74c3c;
+            --info-color: #17a2b8;
             --light-color: #ecf0f1;
             --dark-color: #34495e;
         }
@@ -59,10 +60,13 @@
             display: flex;
             justify-content: space-between;
             margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         
         .status-item {
             flex: 1;
+            min-width: 200px;
             text-align: center;
             padding: 10px;
             border-radius: 5px;
@@ -92,6 +96,12 @@
             padding: 20px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             border-left: 4px solid var(--primary-color);
+            transition: all 0.3s ease;
+        }
+        
+        .device-card.selected {
+            border-left: 4px solid var(--success-color);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }
         
         .device-header {
@@ -171,6 +181,13 @@
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
         }
         
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
         .btn-primary {
             background-color: var(--primary-color);
             color: white;
@@ -188,6 +205,11 @@
         
         .btn-danger {
             background-color: var(--danger-color);
+            color: white;
+        }
+        
+        .btn-info {
+            background-color: var(--info-color);
             color: white;
         }
         
@@ -234,7 +256,6 @@
             background: rgba(52, 152, 219, 0.8);
         }
         
-        /* Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT */
         .front { transform: rotateY(0deg) translateZ(100px); background: rgba(231, 76, 60, 0.8); }
         .back { transform: rotateY(180deg) translateZ(100px); background: rgba(52, 152, 219, 0.8); }
         .right { transform: rotateY(90deg) translateZ(100px); background: rgba(46, 204, 113, 0.8); }
@@ -264,6 +285,12 @@
             font-weight: bold;
             z-index: 1001;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
         
         .notification.success {
@@ -275,62 +302,98 @@
         }
         
         .notification.info {
-            background-color: var(--primary-color);
+            background-color: var(--info-color);
+        }
+        
+        .notification.warning {
+            background-color: var(--warning-color);
         }
         
         .connection-controls {
             display: flex;
             gap: 10px;
             margin-bottom: 15px;
+            flex-wrap: wrap;
         }
         
-        .selected-device-info {
-            background-color: var(--light-color);
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-        }
-
-        
-        .detail-cube-container {
-            width: 250px;
-            height: 250px;
-            margin: 20px auto;
-            perspective: 1000px;
-        }
-        
-        .detail-cube {
-            width: 100%;
-            height: 100%;
-            position: relative;
-            transform-style: preserve-3d;
-            transition: transform 0.5s ease-out;
-        }
-        
-        .detail-face {
-            position: absolute;
-            width: 250px;
-            height: 250px;
-            border: 3px solid #34495e;
+        .server-controls {
             display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            font-weight: bold;
-            color: white;
-            background: rgba(52, 152, 219, 0.8);
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
         }
         
-        .detail-front { transform: rotateY(0deg) translateZ(125px); background: rgba(231, 76, 60, 0.8); }
-        .detail-back { transform: rotateY(180deg) translateZ(125px); background: rgba(52, 152, 219, 0.8); }
-        .detail-right { transform: rotateY(90deg) translateZ(125px); background: rgba(46, 204, 113, 0.8); }
-        .detail-left { transform: rotateY(-90deg) translateZ(125px); background: rgba(155, 89, 182, 0.8); }
-        .detail-top { transform: rotateX(90deg) translateZ(125px); background: rgba(241, 196, 15, 0.8); }
-        .detail-bottom { transform: rotateX(-90deg) translateZ(125px); background: rgba(230, 126, 34, 0.8); }
+        .advanced-controls {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .server-info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .info-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        
+        .info-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+        
+        .log-entry {
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+            font-size: 14px;
+        }
+        
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+        
+        .timestamp {
+            color: #666;
+            font-size: 12px;
+        }
+        
+        .zero-points {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        
+        .zero-points h4 {
+            margin-bottom: 10px;
+            color: #333;
+        }
         
         @media (max-width: 768px) {
             .devices-grid {
                 grid-template-columns: 1fr;
+            }
+            
+            .status-bar {
+                flex-direction: column;
+            }
+            
+            .status-item {
+                min-width: 100%;
+                margin: 5px 0;
+            }
+            
+            .connection-controls,
+            .server-controls {
+                justify-content: center;
             }
         }
     </style>
@@ -343,7 +406,7 @@
         </header>
         
         <div class="card">
-            <h2>Подключение к серверу</h2>
+            <h2>📡 Подключение к серверу</h2>
             <div class="connection-controls">
                 <button class="btn-primary" id="connect-btn">Подключиться к серверу</button>
                 <button class="btn-danger" id="disconnect-btn" disabled>Отключиться</button>
@@ -361,11 +424,45 @@
                 <div class="status-item" id="last-update">
                     Обновлено: -
                 </div>
+                <div class="status-item" id="server-uptime">
+                    Uptime: -
+                </div>
             </div>
         </div>
 
         <div class="card">
-            <h2>Подключенные устройства</h2>
+            <h2>⚙️ Управление сервером</h2>
+            <div class="server-controls">
+                <button class="btn-info" id="get-device-list">Получить список устройств</button>
+                <button class="btn-info" id="get-server-status">Статус сервера</button>
+                <button class="btn-warning" id="clear-inactive">Очистить неактивные</button>
+                <button class="btn-success" id="broadcast-data">Запросить данные</button>
+                <button class="btn-warning" id="broadcast-recalibrate">Калибровать все</button>
+                <button class="btn-danger" id="broadcast-reset">Сбросить все</button>
+            </div>
+            
+            <div class="server-info-grid" id="server-info">
+                <div class="info-item">
+                    <div>Подключенные устройства</div>
+                    <div class="info-value" id="connected-devices">0</div>
+                </div>
+                <div class="info-item">
+                    <div>Свободная память</div>
+                    <div class="info-value" id="free-memory">-</div>
+                </div>
+                <div class="info-item">
+                    <div>Клиенты WiFi</div>
+                    <div class="info-value" id="wifi-clients">-</div>
+                </div>
+                <div class="info-item">
+                    <div>Время работы</div>
+                    <div class="info-value" id="uptime">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📱 Подключенные устройства</h2>
             <div class="devices-grid" id="devices-container">
                 <!-- Устройства будут добавляться динамически -->
                 <div class="device-card">
@@ -380,6 +477,10 @@
                         <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value">0.00°</span></div>
                         <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value">0.00°</span></div>
                         <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value">0.00°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Pitch:</span><span class="data-value">0.00°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Roll:</span><span class="data-value">0.00°</span></div>
+                        <div class="data-item"><span class="data-label">Acc Yaw:</span><span class="data-value">0.00°</span></div>
+                        <div class="data-item"><span class="data-label">Zero Set:</span><span class="data-value">false</span></div>
                         <div class="data-item"><span class="data-label">Zero Pitch:</span><span class="data-value">N/A</span></div>
                         <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value">N/A</span></div>
                         <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value">N/A</span></div>
@@ -388,11 +489,10 @@
                         <h3>3D Визуализация датчика</h3>
                         <div class="cube-container">
                             <div class="cube">
-                                <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
-                                <div class="face front">LEFT</div>
-                                <div class="face back">RIGHT</div>
-                                <div class="face right">FRONT</div>
-                                <div class="face left">BACK</div>
+                                <div class="face front">FRONT</div>
+                                <div class="face back">BACK</div>
+                                <div class="face right">RIGHT</div>
+                                <div class="face left">LEFT</div>
                                 <div class="face top">TOP</div>
                                 <div class="face bottom">BOTTOM</div>
                             </div>
@@ -402,10 +502,22 @@
             </div>
         </div>
 
+        <div class="advanced-controls">
+            <h2>🔧 Расширенные настройки</h2>
+            <div class="server-controls">
+                <button class="btn-info" id="set-rate-100">Частота 100ms</button>
+                <button class="btn-info" id="set-rate-500">Частота 500ms</button>
+                <button class="btn-success" id="broadcast-zero">Установить ноль для всех</button>
+                <button class="btn-warning" id="get-all-data">Получить все данные</button>
+            </div>
+        </div>
+
         <div class="card">
-            <h2>Лог событий</h2>
-            <div id="event-log" style="max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 15px; border-radius: 5px; font-size: 14px;">
-                <div>Готов к подключению...</div>
+            <h2>📊 Лог событий</h2>
+            <div id="event-log" style="max-height: 300px; overflow-y: auto; background: #f8f9fa; padding: 15px; border-radius: 5px; font-size: 14px;">
+                <div class="log-entry">
+                    <span class="timestamp">[Система]</span> Готов к подключению...
+                </div>
             </div>
         </div>
     </div>
@@ -419,6 +531,7 @@
         
         // Хранилище данных всех устройств
         let devicesData = {};
+        let deviceList = [];
         
         // Анимационные таймеры для плавного перемещения
         let animationTimers = {};
@@ -431,20 +544,50 @@
         const serverStatusElement = document.getElementById('server-status');
         const devicesCountElement = document.getElementById('devices-count');
         const lastUpdateElement = document.getElementById('last-update');
+        const serverUptimeElement = document.getElementById('server-uptime');
         const eventLogElement = document.getElementById('event-log');
         const devicesContainer = document.getElementById('devices-container');
-        const selectedDeviceInfo = document.getElementById('selected-device-info');
+        
+        // Новые элементы управления
+        const getDeviceListBtn = document.getElementById('get-device-list');
+        const getServerStatusBtn = document.getElementById('get-server-status');
+        const clearInactiveBtn = document.getElementById('clear-inactive');
+        const broadcastDataBtn = document.getElementById('broadcast-data');
+        const broadcastRecalibrateBtn = document.getElementById('broadcast-recalibrate');
+        const broadcastResetBtn = document.getElementById('broadcast-reset');
+        const setRate100Btn = document.getElementById('set-rate-100');
+        const setRate500Btn = document.getElementById('set-rate-500');
+        const broadcastZeroBtn = document.getElementById('broadcast-zero');
+        const getAllDataBtn = document.getElementById('get-all-data');
+
+        // Элементы информации о сервере
+        const connectedDevicesElement = document.getElementById('connected-devices');
+        const freeMemoryElement = document.getElementById('free-memory');
+        const wifiClientsElement = document.getElementById('wifi-clients');
+        const uptimeElement = document.getElementById('uptime');
 
         // Инициализация
         function init() {
-            // Установка обработчиков событий
+            // Установка обработчиков событий для основных кнопок
             connectBtn.addEventListener('click', connectToServer);
             disconnectBtn.addEventListener('click', disconnectFromServer);
             reconnectBtn.addEventListener('click', reconnectToServer);
             refreshBtn.addEventListener('click', refreshData);
             
+            // Установка обработчиков для новых кнопок
+            getDeviceListBtn.addEventListener('click', () => sendCommand('GET_DEVICE_LIST'));
+            getServerStatusBtn.addEventListener('click', () => sendCommand('GET_SERVER_STATUS'));
+            clearInactiveBtn.addEventListener('click', () => sendCommand('CLEAR_INACTIVE_DEVICES'));
+            broadcastDataBtn.addEventListener('click', () => sendCommand('BROADCAST:GET_DATA'));
+            broadcastRecalibrateBtn.addEventListener('click', () => sendCommand('BROADCAST:RECALIBRATE'));
+            broadcastResetBtn.addEventListener('click', () => sendCommand('BROADCAST:RESET_ANGLES'));
+            setRate100Btn.addEventListener('click', () => sendCommand('SET_UPDATE_RATE:100'));
+            setRate500Btn.addEventListener('click', () => sendCommand('SET_UPDATE_RATE:500'));
+            broadcastZeroBtn.addEventListener('click', () => sendCommand('BROADCAST:SET_CURRENT_AS_ZERO'));
+            getAllDataBtn.addEventListener('click', () => sendCommand('GET_ALL_DATA'));
+            
             // Добавляем сообщение в лог
-            addToLog('Система инициализирована. Готов к подключению.');
+            addToLog('Система инициализирована. Готов к подключению.', 'system');
             
             // Показываем начальный статус
             updateConnectionStatus(false);
@@ -464,10 +607,11 @@
                 isConnected = true;
                 updateConnectionStatus(true);
                 showNotification('Успешно подключено к серверу', 'success');
-                addToLog('Подключение установлено: ' + serverUrl);
+                addToLog('Подключение установлено: ' + serverUrl, 'connection');
                 
                 // Запрашиваем данные после подключения
                 sendCommand('GET_ALL_DATA');
+                sendCommand('GET_SERVER_STATUS');
             };
             
             webSocket.onmessage = function(event) {
@@ -480,12 +624,12 @@
                 isConnected = false;
                 updateConnectionStatus(false);
                 showNotification('Отключено от сервера', 'error');
-                addToLog('Соединение с сервером разорвано');
+                addToLog('Соединение с сервером разорвано', 'connection');
             };
             
             webSocket.onerror = function(error) {
                 showNotification('Ошибка подключения к серверу', 'error');
-                addToLog('Ошибка WebSocket: ' + error);
+                addToLog('Ошибка WebSocket: ' + error, 'error');
             };
         }
         
@@ -496,7 +640,7 @@
             }
             isConnected = false;
             updateConnectionStatus(false);
-            addToLog('Отключение от сервера выполнено');
+            addToLog('Отключение от сервера выполнено', 'connection');
         }
         
         function reconnectToServer() {
@@ -507,7 +651,7 @@
         function refreshData() {
             if (isConnected && webSocket) {
                 sendCommand('GET_ALL_DATA');
-                addToLog('Запрос обновления данных отправлен');
+                addToLog('Запрос обновления данных отправлен', 'command');
             }
         }
         
@@ -518,12 +662,20 @@
                 connectBtn.disabled = true;
                 disconnectBtn.disabled = false;
                 refreshBtn.disabled = false;
+                // Включаем дополнительные кнопки
+                document.querySelectorAll('.server-controls button, .advanced-controls button').forEach(btn => {
+                    btn.disabled = false;
+                });
             } else {
                 serverStatusElement.textContent = 'Сервер: Не подключен';
                 serverStatusElement.className = 'status-item disconnected';
                 connectBtn.disabled = false;
                 disconnectBtn.disabled = true;
                 refreshBtn.disabled = true;
+                // Отключаем дополнительные кнопки
+                document.querySelectorAll('.server-controls button, .advanced-controls button').forEach(btn => {
+                    btn.disabled = true;
+                });
             }
         }
         
@@ -540,6 +692,14 @@
                 if (data.startsWith('CLIENT:')) {
                     parseClientData(data);
                 }
+                // Обработка списка устройств
+                else if (data.startsWith('DEVICE_LIST:')) {
+                    handleDeviceList(data);
+                }
+                // Обработка статуса сервера
+                else if (data.startsWith('SERVER_STATUS:')) {
+                    handleServerStatus(data);
+                }
                 // Обработка статусных сообщений
                 else if (data.includes('SERVER:') || 
                          data.includes('DATA_RECEIVED:') ||
@@ -548,12 +708,23 @@
                          data.includes('RECALIBRATION_COMPLETE') ||
                          data.includes('ANGLES_RESET') ||
                          data.includes('CURRENT_POSITION_SET_AS_ZERO') ||
-                         data.includes('ZERO_SET_AT_CURRENT')) {
+                         data.includes('ZERO_SET_AT_CURRENT') ||
+                         data.includes('CALIBRATION_STARTED') ||
+                         data.includes('DATA_SENDING_STARTED') ||
+                         data.includes('DATA_SENDING_STOPPED') ||
+                         data.includes('DEVICE_READY') ||
+                         data.includes('LOW_BATTERY') ||
+                         data.includes('SENSOR_ERROR') ||
+                         data.includes('DEVICE_INFO') ||
+                         data.includes('CLEARED_DEVICES') ||
+                         data.includes('UPDATE_RATE_SET') ||
+                         data.includes('COMMAND_SENT') ||
+                         data.includes('BROADCAST_SENT')) {
                     handleStatusMessage(data);
                 }
             } catch (error) {
                 console.error('Ошибка обработки данных:', error);
-                addToLog('Ошибка обработки данных: ' + error.message);
+                addToLog('Ошибка обработки данных: ' + error.message, 'error');
             }
         }
         
@@ -586,9 +757,9 @@
                     accRoll: 0,
                     accYaw: 0,
                     zeroSet: false,
-                    zeroPitch: 0,  // ДОБАВЛЕНО: нулевые точки
-                    zeroRoll: 0,   // ДОБАВЛЕНО: нулевые точки
-                    zeroYaw: 0,    // ДОБАВЛЕНО: нулевые точки
+                    zeroPitch: 0,
+                    zeroRoll: 0,
+                    zeroYaw: 0,
                     lastUpdate: new Date(),
                     cubeElement: null,
                     targetPitch: 0,
@@ -598,7 +769,7 @@
                     currentRoll: 0,
                     currentYaw: 0
                 };
-                addToLog('Обнаружено новое устройство: ' + deviceId);
+                addToLog('Обнаружено новое устройство: ' + deviceId, 'device');
             }
             
             // Устанавливаем целевые значения для плавной анимации
@@ -612,7 +783,6 @@
             if (data.ACC_ROLL) devicesData[deviceId].accRoll = parseFloat(data.ACC_ROLL);
             if (data.ACC_YAW) devicesData[deviceId].accYaw = parseFloat(data.ACC_YAW);
             if (data.ZERO_SET) devicesData[deviceId].zeroSet = (data.ZERO_SET === 'true');
-            // ДОБАВЛЕНО: парсинг нулевых точек
             if (data.ZERO_PITCH) devicesData[deviceId].zeroPitch = parseFloat(data.ZERO_PITCH);
             if (data.ZERO_ROLL) devicesData[deviceId].zeroRoll = parseFloat(data.ZERO_ROLL);
             if (data.ZERO_YAW) devicesData[deviceId].zeroYaw = parseFloat(data.ZERO_YAW);
@@ -627,35 +797,90 @@
             updateDevicesCount();
         }
         
+        function handleDeviceList(data) {
+            const deviceListStr = data.substring(12);
+            deviceList = deviceListStr.split(',');
+            addToLog('Получен список устройств: ' + deviceListStr, 'server');
+            showNotification('Список устройств обновлен', 'info');
+        }
+        
+        function handleServerStatus(data) {
+            const statusStr = data.substring(14);
+            const parts = statusStr.split(',');
+            
+            parts.forEach(part => {
+                if (part.startsWith('Uptime:')) {
+                    const uptime = parseInt(part.substring(7));
+                    serverUptimeElement.textContent = 'Uptime: ' + formatUptime(uptime);
+                    uptimeElement.textContent = formatUptime(uptime);
+                } else if (part.startsWith('ConnectedDevices:')) {
+                    const count = parseInt(part.substring(17));
+                    connectedDevicesElement.textContent = count;
+                } else if (part.startsWith('FreeMemory:')) {
+                    const memory = parseInt(part.substring(11));
+                    freeMemoryElement.textContent = Math.round(memory / 1024) + ' KB';
+                } else if (part.startsWith('WiFiClients:')) {
+                    const clients = parseInt(part.substring(12));
+                    wifiClientsElement.textContent = clients;
+                }
+            });
+            
+            addToLog('Статус сервера обновлен', 'server');
+        }
+        
         function handleStatusMessage(message) {
             let statusText = '';
+            let type = 'info';
             
             if (message.includes('SERVER:')) {
-                addToLog('Сервер: ' + message.substring(7));
+                addToLog('Сервер: ' + message.substring(7), 'server');
             } else if (message.includes('DATA_RECEIVED:')) {
-                addToLog('Данные получены от: ' + message.substring(14));
+                addToLog('Данные получены от: ' + message.substring(14), 'data');
+            } else if (message.includes('CLEARED_DEVICES:')) {
+                const count = message.substring(16);
+                statusText = 'Очищено неактивных устройств: ' + count;
+                type = 'warning';
+            } else if (message.includes('UPDATE_RATE_SET:')) {
+                statusText = 'Частота обновления установлена: ' + message.substring(16);
+            } else if (message.includes('COMMAND_SENT:')) {
+                statusText = 'Команда отправлена устройству';
+            } else if (message.includes('BROADCAST_SENT:')) {
+                statusText = 'Широковещательная команда отправлена';
             } else if (message.includes('ZERO_POINT_SET')) {
                 statusText = 'Ноль установлен';
-                showNotification(statusText, 'success');
+                type = 'success';
             } else if (message.includes('ZERO_POINT_RESET')) {
                 statusText = 'Ноль сброшен';
-                showNotification(statusText, 'info');
             } else if (message.includes('RECALIBRATION_COMPLETE')) {
                 statusText = 'Калибровка завершена';
-                showNotification(statusText, 'success');
+                type = 'success';
             } else if (message.includes('ANGLES_RESET')) {
                 statusText = 'Углы сброшены';
-                showNotification(statusText, 'info');
             } else if (message.includes('CURRENT_POSITION_SET_AS_ZERO')) {
                 statusText = 'Текущее положение зафиксировано как ноль';
-                showNotification(statusText, 'success');
+                type = 'success';
             } else if (message.includes('ZERO_SET_AT_CURRENT')) {
                 statusText = 'Ноль установлен в текущем положении';
-                showNotification(statusText, 'success');
+                type = 'success';
+            } else if (message.includes('CALIBRATION_STARTED')) {
+                statusText = 'Начата калибровка';
+                type = 'warning';
+            } else if (message.includes('DEVICE_READY')) {
+                statusText = 'Устройство готово';
+                type = 'success';
+            } else if (message.includes('LOW_BATTERY')) {
+                statusText = 'Низкий заряд батареи';
+                type = 'error';
+            } else if (message.includes('SENSOR_ERROR')) {
+                statusText = 'Ошибка сенсора';
+                type = 'error';
+            } else if (message.includes('DEVICE_INFO')) {
+                statusText = 'Информация об устройстве получена';
             }
             
             if (statusText) {
-                addToLog('Статус: ' + statusText);
+                addToLog('Статус: ' + statusText, 'status');
+                showNotification(statusText, type);
             }
         }
 
@@ -737,6 +962,10 @@
                             <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value">0.00°</span></div>
                             <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value">0.00°</span></div>
                             <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Acc Pitch:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Acc Roll:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Acc Yaw:</span><span class="data-value">0.00°</span></div>
+                            <div class="data-item"><span class="data-label">Zero Set:</span><span class="data-value">false</span></div>
                             <div class="data-item"><span class="data-label">Zero Pitch:</span><span class="data-value">N/A</span></div>
                             <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value">N/A</span></div>
                             <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value">N/A</span></div>
@@ -745,11 +974,10 @@
                             <h3>3D Визуализация датчика</h3>
                             <div class="cube-container">
                                 <div class="cube">
-                                    <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
-                                    <div class="face front">LEFT</div>
-                                    <div class="face back">RIGHT</div>
-                                    <div class="face right">FRONT</div>
-                                    <div class="face left">BACK</div>
+                                    <div class="face front">FRONT</div>
+                                    <div class="face back">BACK</div>
+                                    <div class="face right">RIGHT</div>
+                                    <div class="face left">LEFT</div>
                                     <div class="face top">TOP</div>
                                     <div class="face bottom">BOTTOM</div>
                                 </div>
@@ -763,11 +991,10 @@
             for (const deviceId in devicesData) {
                 const device = devicesData[deviceId];
                 const isSelected = deviceId === selectedDeviceId;
-                const cardStyle = isSelected ? 'border-left: 4px solid var(--success-color);' : '';
+                const cardClass = isSelected ? 'device-card selected' : 'device-card';
                 
                 const deviceCard = document.createElement('div');
-                deviceCard.className = 'device-card';
-                deviceCard.style = cardStyle;
+                deviceCard.className = cardClass;
                 deviceCard.innerHTML = `
                     <div class="device-header">
                         <div class="device-id">${device.deviceId}</div>
@@ -788,15 +1015,22 @@
                         <div class="data-item"><span class="data-label">Zero Roll:</span><span class="data-value" id="zero-roll-${deviceId}">${device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A'}</span></div>
                         <div class="data-item"><span class="data-label">Zero Yaw:</span><span class="data-value" id="zero-yaw-${deviceId}">${device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A'}</span></div>
                     </div>
+                    <div class="zero-points">
+                        <h4>Нулевые точки</h4>
+                        <div class="data-grid">
+                            <div class="data-item"><span class="data-label">Pitch:</span><span class="data-value">${device.zeroPitch.toFixed(2)}°</span></div>
+                            <div class="data-item"><span class="data-label">Roll:</span><span class="data-value">${device.zeroRoll.toFixed(2)}°</span></div>
+                            <div class="data-item"><span class="data-label">Yaw:</span><span class="data-value">${device.zeroYaw.toFixed(2)}°</span></div>
+                        </div>
+                    </div>
                     <div class="visualization">
                         <h3>3D Визуализация датчика</h3>
                         <div class="cube-container">
                             <div class="cube" id="cube-${deviceId}">
-                                <!-- Смещенные надписи: FRONT -> LEFT, LEFT -> BACK, BACK -> RIGHT, RIGHT -> FRONT -->
-                                <div class="face front">LEFT</div>
-                                <div class="face back">RIGHT</div>
-                                <div class="face right">FRONT</div>
-                                <div class="face left">BACK</div>
+                                <div class="face front">FRONT</div>
+                                <div class="face back">BACK</div>
+                                <div class="face right">RIGHT</div>
+                                <div class="face left">LEFT</div>
                                 <div class="face top">TOP</div>
                                 <div class="face bottom">BOTTOM</div>
                             </div>
@@ -804,9 +1038,11 @@
                     </div>
                     <div class="device-controls">
                         <button class="btn-primary" onclick="selectDevice('${deviceId}')">Выбрать</button>
-                        <button class="btn-success" onclick="sendDeviceCommand('${deviceId}', 'SET_CURRENT_AS_ZERO')">Зафиксировать положение нуля</button>
+                        <button class="btn-success" onclick="sendDeviceCommand('${deviceId}', 'SET_CURRENT_AS_ZERO')">Зафиксировать ноль</button>
                         <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'RECALIBRATE')">Калибровать</button>
-                        <button class="btn-danger" onclick="sendDeviceCommand('${deviceId}', 'RESET_ANGLES')">Сбросить</button>
+                        <button class="btn-danger" onclick="sendDeviceCommand('${deviceId}', 'RESET_ANGLES')">Сбросить углы</button>
+                        <button class="btn-info" onclick="sendDeviceCommand('${deviceId}', 'GET_INFO')">Информация</button>
+                        <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'GET_DATA')">Обновить</button>
                     </div>
                 `;
                 
@@ -828,36 +1064,31 @@
             if (!device) return;
             
             // Обновляем отображаемые значения
-            const pitchElement = document.getElementById(`pitch-${deviceId}`);
-            const rollElement = document.getElementById(`roll-${deviceId}`);
-            const yawElement = document.getElementById(`yaw-${deviceId}`);
-            const relPitchElement = document.getElementById(`rel-pitch-${deviceId}`);
-            const relRollElement = document.getElementById(`rel-roll-${deviceId}`);
-            const relYawElement = document.getElementById(`rel-yaw-${deviceId}`);
-            const accPitchElement = document.getElementById(`acc-pitch-${deviceId}`);
-            const accRollElement = document.getElementById(`acc-roll-${deviceId}`);
-            const accYawElement = document.getElementById(`acc-yaw-${deviceId}`);
-            const zeroSetElement = document.getElementById(`zero-set-${deviceId}`);
-            const zeroPitchElement = document.getElementById(`zero-pitch-${deviceId}`);
-            const zeroRollElement = document.getElementById(`zero-roll-${deviceId}`);
-            const zeroYawElement = document.getElementById(`zero-yaw-${deviceId}`);
+            const elements = [
+                { id: `pitch-${deviceId}`, value: device.currentPitch.toFixed(1) + '°' },
+                { id: `roll-${deviceId}`, value: device.currentRoll.toFixed(1) + '°' },
+                { id: `yaw-${deviceId}`, value: device.currentYaw.toFixed(1) + '°' },
+                { id: `rel-pitch-${deviceId}`, value: device.relPitch.toFixed(2) + '°' },
+                { id: `rel-roll-${deviceId}`, value: device.relRoll.toFixed(2) + '°' },
+                { id: `rel-yaw-${deviceId}`, value: device.relYaw.toFixed(2) + '°' },
+                { id: `acc-pitch-${deviceId}`, value: device.accPitch.toFixed(2) + '°' },
+                { id: `acc-roll-${deviceId}`, value: device.accRoll.toFixed(2) + '°' },
+                { id: `acc-yaw-${deviceId}`, value: device.accYaw.toFixed(2) + '°' },
+                { id: `zero-set-${deviceId}`, value: device.zeroSet ? 'true' : 'false' },
+                { id: `zero-pitch-${deviceId}`, value: device.zeroPitch ? device.zeroPitch.toFixed(2) + '°' : 'N/A' },
+                { id: `zero-roll-${deviceId}`, value: device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A' },
+                { id: `zero-yaw-${deviceId}`, value: device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A' }
+            ];
             
-            if (pitchElement) pitchElement.textContent = device.currentPitch.toFixed(1) + '°';
-            if (rollElement) rollElement.textContent = device.currentRoll.toFixed(1) + '°';
-            if (yawElement) yawElement.textContent = device.currentYaw.toFixed(1) + '°';
-            if (relPitchElement) relPitchElement.textContent = device.relPitch.toFixed(2) + '°';
-            if (relRollElement) relRollElement.textContent = device.relRoll.toFixed(2) + '°';
-            if (relYawElement) relYawElement.textContent = device.relYaw.toFixed(2) + '°';
-            if (accPitchElement) accPitchElement.textContent = device.accPitch.toFixed(2) + '°';
-            if (accRollElement) accRollElement.textContent = device.accRoll.toFixed(2) + '°';
-            if (accYawElement) accYawElement.textContent = device.accYaw.toFixed(2) + '°';
-            if (zeroSetElement) {
-                zeroSetElement.textContent = device.zeroSet ? 'true' : 'false';
-                zeroSetElement.style.color = device.zeroSet ? '#28a745' : '#dc3545';
-            }
-            if (zeroPitchElement) zeroPitchElement.textContent = device.zeroPitch ? device.zeroPitch.toFixed(2) + '°' : 'N/A';
-            if (zeroRollElement) zeroRollElement.textContent = device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A';
-            if (zeroYawElement) zeroYawElement.textContent = device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A';
+            elements.forEach(element => {
+                const el = document.getElementById(element.id);
+                if (el) {
+                    el.textContent = element.value;
+                    if (element.id.includes('zero-set')) {
+                        el.style.color = device.zeroSet ? '#28a745' : '#dc3545';
+                    }
+                }
+            });
         }
         
         function updateDevicesCount() {
@@ -868,23 +1099,24 @@
         function selectDevice(deviceId) {
             selectedDeviceId = deviceId;
             updateDevicesDisplay();
-            addToLog('Выбрано устройство: ' + deviceId);
+            addToLog('Выбрано устройство: ' + deviceId, 'device');
         }
 
         // Команды управления
         function sendCommand(command) {
             if (isConnected && webSocket) {
                 webSocket.send('CMD:' + command);
-                addToLog('Отправлена команда: ' + command);
+                addToLog('Отправлена команда: ' + command, 'command');
+            } else {
+                showNotification('Нет подключения к серверу', 'error');
             }
         }
         
         function sendDeviceCommand(deviceId, command) {
             if (isConnected && webSocket) {
-                // Формируем команду для конкретного устройства
                 const fullCommand = 'SEND_TO_DEVICE:' + deviceId + ':' + command;
                 webSocket.send('CMD:' + fullCommand);
-                addToLog(`Команда отправлена устройству ${deviceId}: ${command}`);
+                addToLog(`Команда отправлена устройству ${deviceId}: ${command}`, 'command');
                 showNotification(`Команда "${getCommandName(command)}" отправлена устройству ${deviceId}`, 'info');
             } else {
                 showNotification('Нет подключения к серверу', 'error');
@@ -893,11 +1125,13 @@
         
         function getCommandName(command) {
             const commandNames = {
-                'SET_ZERO': 'Установить ноль',
                 'SET_CURRENT_AS_ZERO': 'Зафиксировать положение нуля',
                 'RECALIBRATE': 'Калибровать',
                 'RESET_ANGLES': 'Сбросить углы',
-                'RESET_ZERO': 'Сбросить ноль'
+                'RESET_ZERO': 'Сбросить ноль',
+                'GET_DATA': 'Получить данные',
+                'GET_INFO': 'Получить информацию',
+                'SET_ZERO': 'Установить ноль'
             };
             return commandNames[command] || command;
         }
@@ -911,14 +1145,42 @@
             document.body.appendChild(notification);
             
             setTimeout(() => {
-                notification.remove();
+                if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                }
             }, 3000);
         }
         
-        function addToLog(message) {
+        function addToLog(message, type = 'info') {
             const timestamp = new Date().toLocaleTimeString();
             const logEntry = document.createElement('div');
-            logEntry.innerHTML = `<strong>[${timestamp}]</strong> ${message}`;
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${message}`;
+            
+            // Добавляем цвет в зависимости от типа сообщения
+            switch(type) {
+                case 'error':
+                    logEntry.style.color = '#dc3545';
+                    break;
+                case 'success':
+                    logEntry.style.color = '#28a745';
+                    break;
+                case 'warning':
+                    logEntry.style.color = '#f39c12';
+                    break;
+                case 'connection':
+                    logEntry.style.color = '#3498db';
+                    break;
+                case 'command':
+                    logEntry.style.color = '#9b59b6';
+                    break;
+                case 'device':
+                    logEntry.style.color = '#e67e22';
+                    break;
+                case 'server':
+                    logEntry.style.color = '#2c3e50';
+                    break;
+            }
             
             eventLogElement.appendChild(logEntry);
             
@@ -926,9 +1188,17 @@
             eventLogElement.scrollTop = eventLogElement.scrollHeight;
             
             // Ограничение количества сообщений в логе
-            if (eventLogElement.children.length > 50) {
+            if (eventLogElement.children.length > 100) {
                 eventLogElement.removeChild(eventLogElement.firstChild);
             }
+        }
+        
+        function formatUptime(milliseconds) {
+            const seconds = Math.floor(milliseconds / 1000);
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
         }
 
         // Автоматическое обновление времени
@@ -940,6 +1210,13 @@
                 sendCommand('GET_ALL_DATA');
             }
         }, 2000);
+        
+        // Автоматический запрос статуса сервера каждые 10 секунд
+        setInterval(() => {
+            if (isConnected) {
+                sendCommand('GET_SERVER_STATUS');
+            }
+        }, 10000);
         
         // Запуск приложения
         window.addEventListener('load', init);

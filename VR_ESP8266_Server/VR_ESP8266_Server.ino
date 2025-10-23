@@ -253,6 +253,53 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             String confirmMsg = "BROADCAST_SENT:" + broadcastCmd;
             webSocket.sendTXT(num, confirmMsg);
           }
+          // ДОБАВЛЕНО: Обработка новых команд
+          else if (command == "GET_DEVICE_LIST") {
+            // Отправляем список всех подключенных устройств
+            String deviceList = "DEVICE_LIST:";
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+              if (clients[i].connected) {
+                if (deviceList != "DEVICE_LIST:") {
+                  deviceList += ",";
+                }
+                deviceList += clients[i].deviceId;
+              }
+            }
+            webSocket.sendTXT(num, deviceList);
+          }
+          else if (command == "CLEAR_INACTIVE_DEVICES") {
+            // Очистка неактивных устройств
+            int clearedCount = 0;
+            unsigned long currentTime = millis();
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+              if (clients[i].connected && (currentTime - clients[i].lastUpdate > DATA_TIMEOUT)) {
+                Serial.println("Clearing inactive device: " + clients[i].deviceId);
+                clients[i].connected = false;
+                clients[i].deviceId = "";
+                clearedCount++;
+              }
+            }
+            String clearMsg = "CLEARED_DEVICES:" + String(clearedCount);
+            webSocket.sendTXT(num, clearMsg);
+          }
+          else if (command == "GET_SERVER_STATUS") {
+            // Статус сервера
+            int connectedCount = 0;
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+              if (clients[i].connected) connectedCount++;
+            }
+            String statusMsg = "SERVER_STATUS:Uptime:" + String(millis()) + 
+                              ",ConnectedDevices:" + String(connectedCount) +
+                              ",FreeMemory:" + String(ESP.getFreeHeap());
+            webSocket.sendTXT(num, statusMsg);
+          }
+          else if (command.startsWith("SET_UPDATE_RATE:")) {
+            // Установка частоты обновления (для информационных целей)
+            String rate = command.substring(16);
+            String rateMsg = "UPDATE_RATE_SET:" + rate + "ms";
+            webSocket.sendTXT(num, rateMsg);
+            Serial.println("Update rate info: " + rate + "ms");
+          }
         }
         // Обработка статусных сообщений от клиентов MPU6050
         else if (message.startsWith("CLIENT_ID:") || 
@@ -262,10 +309,23 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                  message.startsWith("ZERO_POINT_RESET:") ||
                  message.startsWith("FORCE_CALIBRATION_COMPLETE:") ||
                  message.startsWith("CURRENT_POSITION_SET_AS_ZERO:") ||
-                 message.startsWith("ZERO_SET_AT_CURRENT:")) {
+                 message.startsWith("ZERO_SET_AT_CURRENT:") ||
+                 // ДОБАВЛЕНО: новые статусные сообщения
+                 message.startsWith("CALIBRATION_STARTED:") ||
+                 message.startsWith("DATA_SENDING_STARTED:") ||
+                 message.startsWith("DATA_SENDING_STOPPED:") ||
+                 message.startsWith("DEVICE_READY:") ||
+                 message.startsWith("LOW_BATTERY:") ||
+                 message.startsWith("SENSOR_ERROR:")) {
           // Пересылаем статусные сообщения всем веб-клиентам
           webSocket.broadcastTXT(message);
           Serial.println("Status message broadcasted: " + message);
+        }
+        // ДОБАВЛЕНО: Обработка запросов информации от устройств
+        else if (message.startsWith("DEVICE_INFO:")) {
+          // Пересылаем информацию об устройстве всем веб-клиентам
+          webSocket.broadcastTXT(message);
+          Serial.println("Device info broadcasted: " + message);
         }
       }
       break;
@@ -312,10 +372,12 @@ void handleRoot() {
   html += ".btn-success { background: #28a745; color: white; }";
   html += ".btn-warning { background: #ffc107; color: black; }";
   html += ".btn-danger { background: #dc3545; color: white; }";
+  html += ".btn-info { background: #17a2b8; color: white; }";
   html += ".server-info { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }";
   html += ".connection-status { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; }";
   html += ".connected { background: #d4edda; color: #155724; border: 2px solid #c3e6cb; }";
   html += ".disconnected { background: #f8d7da; color: #721c24; border: 2px solid #f5c6cb; }";
+  html += ".advanced-controls { background: #e3f2fd; padding: 20px; border-radius: 10px; margin: 20px 0; }";
   html += "</style>";
   html += "</head><body>";
   html += "<div class=\"container\">";
@@ -330,6 +392,7 @@ void handleRoot() {
   html += "<p><strong>IP Address:</strong> 192.168.4.1</p>";
   html += "<p><strong>WebSocket Port:</strong> 81</p>";
   html += "<p><strong>Connected Devices:</strong> <span id=\"connectedCount\">0</span></p>";
+  html += "<p><strong>Server Uptime:</strong> <span id=\"serverUptime\">0</span> ms</p>";
   html += "</div>";
   html += "<div class=\"controls\">";
   html += "<h3>🛠️ Server Controls</h3>";
@@ -338,6 +401,14 @@ void handleRoot() {
   html += "<button class=\"btn-warning\" onclick=\"sendCommand('BROADCAST:RECALIBRATE')\">Recalibrate All Devices</button>";
   html += "<button class=\"btn-danger\" onclick=\"sendCommand('BROADCAST:RESET_ANGLES')\">Reset All Angles</button>";
   html += "<button class=\"btn-success\" onclick=\"sendCommand('BROADCAST:SET_CURRENT_AS_ZERO')\">Fix Current Position as Zero for All</button>";
+  html += "</div>";
+  html += "<div class=\"advanced-controls\">";
+  html += "<h3>⚙️ Advanced Controls</h3>";
+  html += "<button class=\"btn-info\" onclick=\"sendCommand('GET_DEVICE_LIST')\">Get Device List</button>";
+  html += "<button class=\"btn-info\" onclick=\"sendCommand('GET_SERVER_STATUS')\">Get Server Status</button>";
+  html += "<button class=\"btn-warning\" onclick=\"sendCommand('CLEAR_INACTIVE_DEVICES')\">Clear Inactive Devices</button>";
+  html += "<button class=\"btn-info\" onclick=\"sendCommand('SET_UPDATE_RATE:100')\">Set Update Rate: 100ms</button>";
+  html += "<button class=\"btn-info\" onclick=\"sendCommand('SET_UPDATE_RATE:500')\">Set Update Rate: 500ms</button>";
   html += "</div>";
   html += "<div id=\"clientsContainer\" class=\"clients-grid\"></div>";
   html += "<div class=\"server-info\">";
@@ -374,6 +445,35 @@ void handleRoot() {
   html += "}";
   html += "else if (event.data.startsWith('ZERO_SET_AT_CURRENT:')) {";
   html += "showNotification('Zero point set at current position for device', 'success');";
+  html += "}";
+  html += "// ДОБАВЛЕНО: обработка новых сообщений";
+  html += "else if (event.data.startsWith('DEVICE_LIST:')) {";
+  html += "showNotification('Device list: ' + event.data.substring(12), 'info');";
+  html += "}";
+  html += "else if (event.data.startsWith('SERVER_STATUS:')) {";
+  html += "const status = event.data.substring(14);";
+  html += "const parts = status.split(',');";
+  html += "parts.forEach(part => {";
+  html += "if (part.startsWith('Uptime:')) {";
+  html += "document.getElementById('serverUptime').textContent = part.substring(7);";
+  html += "}";
+  html += "});";
+  html += "showNotification('Server status updated', 'info');";
+  html += "}";
+  html += "else if (event.data.startsWith('CLEARED_DEVICES:')) {";
+  html += "showNotification('Cleared ' + event.data.substring(16) + ' inactive devices', 'warning');";
+  html += "}";
+  html += "else if (event.data.startsWith('UPDATE_RATE_SET:')) {";
+  html += "showNotification('Update rate set to: ' + event.data.substring(16), 'info');";
+  html += "}";
+  html += "else if (event.data.startsWith('CALIBRATION_STARTED:')) {";
+  html += "showNotification('Calibration started for: ' + event.data.substring(20), 'info');";
+  html += "}";
+  html += "else if (event.data.startsWith('DEVICE_INFO:')) {";
+  html += "showNotification('Device info: ' + event.data.substring(12), 'info');";
+  html += "}";
+  html += "else if (event.data.startsWith('LOW_BATTERY:')) {";
+  html += "showNotification('Low battery warning: ' + event.data.substring(12), 'error');";
   html += "}";
   html += "};";
   html += "ws.onclose = function() {";
@@ -430,6 +530,7 @@ void handleRoot() {
   html += "<button class=\\\"btn-warning\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RECALIBRATE')\\\">Recalibrate</button>";
   html += "<button class=\\\"btn-success\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'SET_CURRENT_AS_ZERO')\\\">Fix Current Position as Zero</button>";
   html += "<button class=\\\"btn-danger\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RESET_ZERO')\\\">Reset Zero</button>";
+  html += "<button class=\\\"btn-info\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'GET_INFO')\\\">Get Device Info</button>";
   html += "</div>";
   html += "`;";
   html += "container.appendChild(card);";
@@ -461,162 +562,154 @@ void handleRoot() {
   html += "ws.send('CMD:' + command);";
   html += "console.log('Sent command:', command);";
   html += "} else {";
-  html += "console.log('WebSocket not connected');";
-  html += "showNotification('WebSocket not connected', 'error');";
+  html += "console.error('WebSocket not connected');";
   html += "}";
   html += "}";
   html += "function sendDeviceCommand(deviceId, command) {";
-  html += "if (ws && ws.readyState === WebSocket.OPEN) {";
-  html += "ws.send('CMD:SEND_TO_DEVICE:' + deviceId + ':' + command);";
-  html += "console.log('Sent command to ' + deviceId + ':', command);";
-  html += "} else {";
-  html += "console.log('WebSocket not connected');";
-  html += "showNotification('WebSocket not connected', 'error');";
+  html += "sendCommand('SEND_TO_DEVICE:' + deviceId + ':' + command);";
   html += "}";
+  html += "function showNotification(message, type) {";
+  html += "console.log(type + ': ' + message);";
   html += "}";
-  html += "function showNotification(message, type = 'info') {";
-  html += "const notification = document.createElement('div');";
-  html += "notification.textContent = message;";
-  html += "notification.style.cssText = `";
-  html += "position: fixed;";
-  html += "top: 20px;";
-  html += "right: 20px;";
-  html += "padding: 15px 20px;";
-  html += "border-radius: 5px;";
-  html += "color: white;";
-  html += "font-weight: bold;";
-  html += "z-index: 1000;";
-  html += "background: ${type === 'success' ? '#28a745' : type === 'error' ? '#dc3545' : '#17a2b8'};";
-  html += "box-shadow: 0 4px 12px rgba(0,0,0,0.3);";
-  html += "`;";
-  html += "document.body.appendChild(notification);";
-  html += "setTimeout(() => {";
-  html += "if (notification.parentNode) {";
-  html += "notification.parentNode.removeChild(notification);";
-  html += "}";
-  html += "}, 3000);";
-  html += "}";
-  html += "window.addEventListener('load', function() {";
   html += "connectWebSocket();";
   html += "setInterval(() => {";
   html += "sendCommand('GET_ALL_DATA');";
-  html += "}, 2000);";
-  html += "});";
+  html += "}, 1000);";
   html += "</script>";
   html += "</body></html>";
-
-  addCORSHeaders();
+  
   server.send(200, "text/html", html);
-}
-
-// API для получения данных клиентов
-void handleAPIClients() {
-  addCORSHeaders();
-  
-  DynamicJsonDocument doc(2048);
-  JsonArray clientsArray = doc.to<JsonArray>();
-  
-  for (int i = 0; i < MAX_CLIENTS; i++) {
-    if (clients[i].connected) {
-      JsonObject client = clientsArray.createNestedObject();
-      client["deviceId"] = clients[i].deviceId;
-      client["pitch"] = clients[i].pitch;
-      client["roll"] = clients[i].roll;
-      client["yaw"] = clients[i].yaw;
-      client["relPitch"] = clients[i].relPitch;
-      client["relRoll"] = clients[i].relRoll;
-      client["relYaw"] = clients[i].relYaw;
-      client["accPitch"] = clients[i].accPitch;
-      client["accRoll"] = clients[i].accRoll;
-      client["accYaw"] = clients[i].accYaw;
-      client["zeroSet"] = clients[i].zeroSet;
-      client["zeroPitch"] = clients[i].zeroPitch;    // ДОБАВЛЕНО
-      client["zeroRoll"] = clients[i].zeroRoll;      // ДОБАВЛЕНО
-      client["zeroYaw"] = clients[i].zeroYaw;        // ДОБАВЛЕНО
-      client["lastUpdate"] = clients[i].lastUpdate;
-    }
-  }
-  
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-
-// API для отправки команд устройствам
-void handleAPICommand() {
-  addCORSHeaders();
-  
-  if (server.method() == HTTP_POST) {
-    String deviceId = server.arg("deviceId");
-    String command = server.arg("command");
-    
-    if (deviceId != "" && command != "") {
-      Serial.println("API Command for " + deviceId + ": " + command);
-      
-      // Отправляем команду через WebSocket
-      int clientIndex = findClientIndex(deviceId);
-      if (clientIndex != -1 && clients[clientIndex].connected) {
-        // ИСПРАВЛЕНИЕ: создаем переменную для передачи в broadcastTXT
-        String broadcastMessage = "CMD:SEND_TO_DEVICE:" + deviceId + ":" + command;
-        webSocket.broadcastTXT(broadcastMessage);
-        server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Command sent\"}");
-      } else {
-        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found\"}");
-      }
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println();
+  delay(1000);
   
-  // Запуск точки доступа
-  Serial.println("Starting Access Point...");
+  Serial.println("\n🚀 Starting VR Data Server...");
+  
+  // Настройка WiFi в режиме точки доступа
+  WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password);
   
-  Serial.print("AP SSID: ");
+  Serial.println("📡 WiFi Access Point Started");
+  Serial.print("SSID: ");
   Serial.println(ap_ssid);
-  Serial.print("AP IP address: ");
+  Serial.print("IP Address: ");
   Serial.println(WiFi.softAPIP());
   
-  // Настройка Web сервера
+  // Настройка маршрутов сервера
   server.on("/", handleRoot);
-  server.on("/api/clients", HTTP_GET, handleAPIClients);
-  server.on("/api/command", HTTP_POST, handleAPICommand);
+  server.on("/data", HTTP_GET, []() {
+    addCORSHeaders();
+    
+    // Создаем JSON с данными всех клиентов
+    String json = "[";
+    bool first = true;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+      if (clients[i].connected) {
+        if (!first) json += ",";
+        first = false;
+        
+        json += "{";
+        json += "\"deviceId\":\"" + clients[i].deviceId + "\",";
+        json += "\"pitch\":" + String(clients[i].pitch, 2) + ",";
+        json += "\"roll\":" + String(clients[i].roll, 2) + ",";
+        json += "\"yaw\":" + String(clients[i].yaw, 2) + ",";
+        json += "\"relPitch\":" + String(clients[i].relPitch, 2) + ",";
+        json += "\"relRoll\":" + String(clients[i].relRoll, 2) + ",";
+        json += "\"relYaw\":" + String(clients[i].relYaw, 2) + ",";
+        json += "\"accPitch\":" + String(clients[i].accPitch, 2) + ",";
+        json += "\"accRoll\":" + String(clients[i].accRoll, 2) + ",";
+        json += "\"accYaw\":" + String(clients[i].accYaw, 2) + ",";
+        json += "\"zeroSet\":" + String(clients[i].zeroSet ? "true" : "false") + ",";
+        json += "\"zeroPitch\":" + String(clients[i].zeroPitch, 2) + ",";
+        json += "\"zeroRoll\":" + String(clients[i].zeroRoll, 2) + ",";
+        json += "\"zeroYaw\":" + String(clients[i].zeroYaw, 2);
+        json += "}";
+      }
+    }
+    json += "]";
+    
+    server.send(200, "application/json", json);
+  });
   
-  // OPTIONS handlers для CORS
-  server.on("/api/clients", HTTP_OPTIONS, handleOptions);
-  server.on("/api/command", HTTP_OPTIONS, handleOptions);
+  // ДОБАВЛЕНО: новый маршрут для получения списка устройств
+  server.on("/devices", HTTP_GET, []() {
+    addCORSHeaders();
+    
+    String json = "[";
+    bool first = true;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+      if (clients[i].connected) {
+        if (!first) json += ",";
+        first = false;
+        
+        json += "{";
+        json += "\"deviceId\":\"" + clients[i].deviceId + "\",";
+        json += "\"lastUpdate\":" + String(clients[i].lastUpdate) + ",";
+        json += "\"connected\":true";
+        json += "}";
+      }
+    }
+    json += "]";
+    
+    server.send(200, "application/json", json);
+  });
   
-  server.enableCORS(true);
+  // ДОБАВЛЕНО: новый маршрут для получения статуса сервера
+  server.on("/status", HTTP_GET, []() {
+    addCORSHeaders();
+    
+    int connectedCount = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+      if (clients[i].connected) connectedCount++;
+    }
+    
+    String json = "{";
+    json += "\"uptime\":" + String(millis()) + ",";
+    json += "\"connectedDevices\":" + String(connectedCount) + ",";
+    json += "\"maxDevices\":" + String(MAX_CLIENTS) + ",";
+    json += "\"freeMemory\":" + String(ESP.getFreeHeap()) + ",";
+    json += "\"wifiClients\":" + String(WiFi.softAPgetStationNum());
+    json += "}";
+    
+    server.send(200, "application/json", json);
+  });
+  
+  // Обработчик OPTIONS запросов
+  server.onNotFound([]() {
+    if (server.method() == HTTP_OPTIONS) {
+      handleOptions();
+    } else {
+      server.send(404, "text/plain", "Not Found");
+    }
+  });
+  
+  // Запуск сервера
   server.begin();
+  Serial.println("✅ HTTP Server started on port 80");
   
   // Запуск WebSocket сервера
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
+  Serial.println("✅ WebSocket Server started on port 81");
   
-  Serial.println("HTTP server started on port 80");
-  Serial.println("WebSocket server started on port 81");
-  Serial.println("Server is ready! Connect to WiFi: " + String(ap_ssid));
+  Serial.println("🎯 Server is ready! Connect to WiFi: " + String(ap_ssid));
+  Serial.println("📊 Web Interface: http://" + WiFi.softAPIP().toString());
 }
 
 void loop() {
   server.handleClient();
   webSocket.loop();
   
-  // Очистка устаревших клиентов
+  // Очистка устаревших клиентов каждые 10 секунд
   static unsigned long lastCleanup = 0;
-  if (millis() - lastCleanup > 1000) {
+  if (millis() - lastCleanup > 10000) {
     cleanupOldClients();
     lastCleanup = millis();
   }
   
-  // Автоматическая отправка данных каждые 100мс
+  // Рассылка данных каждые 100 мс
   static unsigned long lastBroadcast = 0;
   if (millis() - lastBroadcast > 100) {
     broadcastData();
