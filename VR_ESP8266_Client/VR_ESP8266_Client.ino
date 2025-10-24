@@ -4,6 +4,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <WebSocketsServer.h>
+#include <WebSocketsClient.h>
 #include <EEPROM.h>
 
 Adafruit_MPU6050 mpu;
@@ -11,6 +12,14 @@ Adafruit_MPU6050 mpu;
 // WiFi credentials
 const char* ssid = "ESP8266_Network_Monitor";
 const char* password = "12345678";
+
+// Multi-user socket server settings
+const char* SOCKET_SERVER_HOST = "192.168.4.1";
+const uint16_t SOCKET_SERVER_PORT = 81;
+bool socketServerConnected = false;
+unsigned long lastSocketReconnectAttempt = 0;
+const unsigned long SOCKET_RECONNECT_INTERVAL = 5000;
+WebSocketsClient socketClient;
 
 // Имя подключаемого устройства (будет загружено из EEPROM)
 String deviceName = "VR-Head-Hom-001";
@@ -44,6 +53,10 @@ bool clientConnected = false;
 unsigned long lastDataSend = 0;
 const unsigned long SEND_INTERVAL = 50;
 const float CHANGE_THRESHOLD = 1.0;
+
+// Интервал отправки данных на сокет-сервер
+unsigned long lastSocketSend = 0;
+const unsigned long SOCKET_SEND_INTERVAL = 100;
 
 // Функция для проверки валидности имени устройства
 bool isValidDeviceName(const String& name) {
@@ -216,6 +229,12 @@ void changeDeviceName(const String& newName) {
     // Уведомляем всех подключенных клиентов
     String message = "DEVICE_NAME_CHANGED:" + deviceName;
     webSocket.broadcastTXT(message);
+    
+    // Отправляем обновленное имя на сокет-сервер
+    if (socketServerConnected) {
+      String socketMsg = "DEVICE_NAME:" + deviceName;
+      socketClient.sendTXT(socketMsg);
+    }
   } else {
     // В случае ошибки восстанавливаем старое имя
     deviceName = oldName;
@@ -378,6 +397,35 @@ void calibrateSensor() {
   Serial.print(" Z: "); Serial.println(gyroOffsetZ, 6);
 }
 
+// Отправка данных на многопользовательский сокет-сервер
+void sendDataToSocketServer() {
+  if (!socketServerConnected) return;
+  
+  // Обновляем накопленные углы
+  updateAccumulatedAngles();
+  
+  // Получаем относительные углы
+  double relPitch = getRelativePitch();
+  double relRoll = getRelativeRoll();
+  double relYaw = getRelativeYaw();
+  
+  // Формируем данные для отправки на сокет-сервер
+  String data = "DEVICE:" + deviceName +
+                ",PITCH:" + String(pitch, 1) + 
+                ",ROLL:" + String(roll, 1) + 
+                ",YAW:" + String(yaw, 1) +
+                ",REL_PITCH:" + String(relPitch, 2) +
+                ",REL_ROLL:" + String(relRoll, 2) +
+                ",REL_YAW:" + String(relYaw, 2) +
+                ",ACC_PITCH:" + String(accumulatedPitch, 2) +
+                ",ACC_ROLL:" + String(accumulatedRoll, 2) +
+                ",ACC_YAW:" + String(accumulatedYaw, 2) +
+                ",ZERO_SET:" + String(zeroSet ? "true" : "false") +
+                ",TIMESTAMP:" + String(millis());
+  
+  socketClient.sendTXT(data);
+}
+
 void sendSensorData() {
   // Обновляем накопленные углы
   updateAccumulatedAngles();
@@ -425,6 +473,8 @@ void sendSensorData() {
       Serial.print("Yaw:   "); Serial.print(accumulatedYaw, 2); Serial.print("°  ");
       Serial.println(visualizeAngle(accumulatedYaw));
       
+      Serial.print("Socket Server: ");
+      Serial.println(socketServerConnected ? "CONNECTED" : "DISCONNECTED");
       Serial.println("===================");
       lastDebugPrint = millis();
     }
@@ -435,6 +485,54 @@ bool dataChanged() {
   return (abs(pitch - lastSentPitch) >= CHANGE_THRESHOLD ||
           abs(roll - lastSentRoll) >= CHANGE_THRESHOLD ||
           abs(yaw - lastSentYaw) >= CHANGE_THRESHOLD);
+}
+
+// Обработчик событий сокет-клиента (подключение к многопользовательскому серверу)
+void socketClientEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("Disconnected from multi-user socket server");
+      socketServerConnected = false;
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        Serial.println("Connected to multi-user socket server!");
+        socketServerConnected = true;
+        
+        // Отправляем информацию об устройстве при подключении
+        String connectMsg = "DEVICE_CONNECTED:" + deviceName + ",IP:" + WiFi.localIP().toString();
+        socketClient.sendTXT(connectMsg);
+        
+        Serial.println("Sent device info to socket server: " + connectMsg);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        Serial.println("Received from socket server: " + message);
+        
+        // Обработка команд от сокет-сервера (если нужно)
+        if (message == "PING") {
+          socketClient.sendTXT("PONG");
+        }
+        else if (message == "GET_STATUS") {
+          sendDataToSocketServer();
+        }
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.println("Socket client error");
+      socketServerConnected = false;
+      break;
+      
+    case WStype_PING:
+    case WStype_PONG:
+      // Поддержание соединения
+      break;
+  }
 }
 
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -492,7 +590,8 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                              ",MAC:" + WiFi.macAddress() +
                              ",FIRMWARE:VR_Headset_v1.0" +
                              ",UNLIMITED_ANGLES:true" +
-                             ",EEPROM:enabled";
+                             ",EEPROM:enabled" +
+                             ",SOCKET_SERVER:" + String(socketServerConnected ? "connected" : "disconnected");
           webSocket.sendTXT(num, deviceInfo);
         }
         else if (message == "PRINT_DEBUG") {
@@ -507,6 +606,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           Serial.print("Accumulated Yaw: "); Serial.println(accumulatedYaw, 2);
           Serial.print("Zero Set: "); Serial.println(zeroSet ? "YES" : "NO");
           Serial.print("Device Name: "); Serial.println(deviceName);
+          Serial.print("Socket Server: "); Serial.println(socketServerConnected ? "CONNECTED" : "DISCONNECTED");
           Serial.println("==================");
         }
         else if (message.startsWith("SET_DEVICE_NAME:")) {
@@ -566,6 +666,20 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
+// Функция для подключения к многопользовательскому сокет-серверу
+void connectToSocketServer() {
+  Serial.println("Attempting to connect to multi-user socket server...");
+  Serial.print("Host: "); Serial.print(SOCKET_SERVER_HOST);
+  Serial.print(" Port: "); Serial.println(SOCKET_SERVER_PORT);
+  
+  // Настраиваем клиент WebSocket
+  socketClient.begin(SOCKET_SERVER_HOST, SOCKET_SERVER_PORT, "/");
+  socketClient.onEvent(socketClientEvent);
+  socketClient.setReconnectInterval(SOCKET_RECONNECT_INTERVAL);
+  
+  Serial.println("Socket client configured");
+}
+
 void addCORSHeaders() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -602,7 +716,8 @@ void handleAPIStatus() {
   json += "\"accPitch\":" + String(accumulatedPitch, 2) + ",";
   json += "\"accRoll\":" + String(accumulatedRoll, 2) + ",";
   json += "\"accYaw\":" + String(accumulatedYaw, 2) + ",";
-  json += "\"zeroSet\":" + String(zeroSet ? "true" : "false");
+  json += "\"zeroSet\":" + String(zeroSet ? "true" : "false") + ",";
+  json += "\"socketServerConnected\":" + String(socketServerConnected ? "true" : "false");
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -638,6 +753,7 @@ void handleDeviceInfo() {
   json += "\"sensor\":\"MPU6050\",";
   json += "\"unlimited_angles\":\"true\",";
   json += "\"eeprom\":\"enabled\",";
+  json += "\"socket_server_connected\":" + String(socketServerConnected ? "true" : "false") + ",";
   json += "\"status\":\"running\"";
   json += "}";
   server.send(200, "application/json", json);
@@ -722,6 +838,7 @@ void handleRoot() {
         .device-info { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid #2196f3; }
         .unlimited-badge { background: #28a745; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 10px; }
         .eeprom-badge { background: #ffc107; color: black; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; }
+        .socket-badge { background: #6f42c1; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; }
         .info-text { font-size: 12px; color: #666; margin-top: 5px; }
         .name-input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; margin-right: 10px; width: 200px; }
     </style>
@@ -731,12 +848,14 @@ void handleRoot() {
         <h1>MPU6050 Sensor Data - )rawliteral" + deviceName + R"rawliteral( 
             <span class="unlimited-badge">UNLIMITED ANGLES</span>
             <span class="eeprom-badge">EEPROM</span>
+            <span class="socket-badge">MULTI-USER</span>
         </h1>
         
         <div class="device-info">
             <strong>Device:</strong> <span id="deviceName">)rawliteral" + deviceName + R"rawliteral(</span> | 
             <strong>IP:</strong> <span id="deviceIP">)</span> | 
-            <strong>Status:</strong> <span id="deviceStatus">Connected</span>
+            <strong>Status:</strong> <span id="deviceStatus">Connected</span> |
+            <strong>Socket Server:</strong> <span id="socketServerStatus" style="color: #dc3545;">Disconnected</span>
         </div>
         
         <div class="status" id="status">Disconnected</div>
@@ -822,6 +941,7 @@ void handleRoot() {
         let deviceIP = document.getElementById('deviceIP');
         let deviceStatus = document.getElementById('deviceStatus');
         let deviceNameSpan = document.getElementById('deviceName');
+        let socketServerStatus = document.getElementById('socketServerStatus');
         
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -853,6 +973,11 @@ void handleRoot() {
                     for (let part of parts) {
                         if (part.startsWith('IP:')) {
                             deviceIP.textContent = part.split(':')[1];
+                        }
+                        if (part.startsWith('SOCKET_SERVER:')) {
+                            const status = part.split(':')[1];
+                            socketServerStatus.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+                            socketServerStatus.style.color = status === 'connected' ? '#28a745' : '#dc3545';
                         }
                     }
                 }
@@ -1062,6 +1187,9 @@ void setup() {
     Serial.println("Device Name: " + deviceName);
     Serial.println("UNLIMITED ANGLES: All relative angles can exceed 360°");
     Serial.println("EEPROM: Device name storage enabled");
+    
+    // Подключаемся к многопользовательскому сокет-серверу
+    connectToSocketServer();
   } else {
     Serial.println("\nFailed to connect to WiFi!");
     return;
@@ -1108,6 +1236,7 @@ void setup() {
   
   Serial.println("HTTP server started on port 80");
   Serial.println("WebSocket server started on port 81");
+  Serial.println("Multi-user socket client configured for: " + String(SOCKET_SERVER_HOST) + ":" + String(SOCKET_SERVER_PORT));
   Serial.println("All relative angles (Pitch, Roll, Yaw) now support unlimited rotation beyond 360°");
   Serial.println("Device name management commands available:");
   Serial.println("  SET_DEVICE_NAME:NewName - Change device name");
@@ -1117,11 +1246,20 @@ void setup() {
   
   lastDataSend = millis();
   lastTime = millis();
+  lastSocketSend = millis();
 }
 
 void loop() {
   server.handleClient();
   webSocket.loop();
+  socketClient.loop(); // Обработка сокет-клиента
+  
+  // Попытка переподключения к сокет-серверу, если соединение потеряно
+  if (!socketServerConnected && millis() - lastSocketReconnectAttempt > SOCKET_RECONNECT_INTERVAL) {
+    Serial.println("Attempting to reconnect to socket server...");
+    connectToSocketServer();
+    lastSocketReconnectAttempt = millis();
+  }
   
   if (!calibrated) return;
   
@@ -1158,11 +1296,18 @@ void loop() {
   if (yaw > 180) yaw -= 360;
   else if (yaw < -180) yaw += 360;
   
+  // Отправка данных на локальный WebSocket
   if (clientConnected && (currentTime - lastDataSend >= SEND_INTERVAL)) {
     if (dataChanged() || lastDataSend == 0) {
       sendSensorData();
       lastDataSend = currentTime;
     }
+  }
+  
+  // Отправка данных на многопользовательский сокет-сервер
+  if (socketServerConnected && (currentTime - lastSocketSend >= SOCKET_SEND_INTERVAL)) {
+    sendDataToSocketServer();
+    lastSocketSend = currentTime;
   }
   
   delay(10);
