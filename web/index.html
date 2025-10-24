@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MPU6050 Sensor Data Monitor</title>
     <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --success-color: #27ae60;
+            --warning-color: #f39c12;
+            --danger-color: #e74c3c;
+            --light-color: #ecf0f1;
+            --dark-color: #34495e;
+        }
+        
         body {
             font-family: Arial, sans-serif;
             margin: 0;
@@ -16,7 +26,7 @@
             margin: 0 auto;
         }
         .header {
-            background: #2c3e50;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
             color: white;
             padding: 20px;
             border-radius: 8px;
@@ -32,7 +42,7 @@
         .disconnected { background: #f8d7da; color: #721c24; }
         .sensors-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
             gap: 20px;
         }
         .sensor-card {
@@ -109,6 +119,124 @@
         }
         .hidden {
             display: none !important;
+        }
+        
+        /* 3D Visualization Styles from index_v1.html */
+        .visualization {
+            background-color: var(--secondary-color);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+        
+        .visualization h3 {
+            color: white;
+            text-align: center;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+        
+        .cube-container {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto;
+            perspective: 600px;
+        }
+        
+        .cube {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.1s ease-out;
+        }
+        
+        .face {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            border: 2px solid #34495e;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+            background: rgba(52, 152, 219, 0.8);
+        }
+        
+        .front { transform: rotateY(0deg) translateZ(60px); background: rgba(231, 76, 60, 0.8); }
+        .back { transform: rotateY(180deg) translateZ(60px); background: rgba(52, 152, 219, 0.8); }
+        .right { transform: rotateY(90deg) translateZ(60px); background: rgba(46, 204, 113, 0.8); }
+        .left { transform: rotateY(-90deg) translateZ(60px); background: rgba(155, 89, 182, 0.8); }
+        .top { transform: rotateX(90deg) translateZ(60px); background: rgba(241, 196, 15, 0.8); }
+        .bottom { transform: rotateX(-90deg) translateZ(60px); background: rgba(230, 126, 34, 0.8); }
+        
+        .device-controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        
+        .device-controls button {
+            padding: 8px 12px;
+            font-size: 12px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+        }
+        
+        .btn-success {
+            background-color: var(--success-color);
+            color: white;
+        }
+        
+        .btn-warning {
+            background-color: var(--warning-color);
+            color: white;
+        }
+        
+        .btn-danger {
+            background-color: var(--danger-color);
+            color: white;
+        }
+        
+        .device-controls button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 5px;
+            color: white;
+            font-weight: bold;
+            z-index: 1001;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        
+        .notification.success {
+            background-color: var(--success-color);
+        }
+        
+        .notification.error {
+            background-color: var(--danger-color);
+        }
+        
+        .notification.info {
+            background-color: var(--primary-color);
         }
     </style>
 </head>
@@ -261,7 +389,11 @@
                     this.sensors.set(sensorName, {
                         element: existingCard,
                         lastUpdate: Date.now(),
-                        active: true
+                        active: true,
+                        pitch: 0,
+                        roll: 0,
+                        yaw: 0,
+                        cubeElement: null
                     });
                     this.markSensorActive(sensorName);
                 } else {
@@ -270,7 +402,11 @@
                     this.sensors.set(sensorName, {
                         element: element,
                         lastUpdate: Date.now(),
-                        active: true
+                        active: true,
+                        pitch: 0,
+                        roll: 0,
+                        yaw: 0,
+                        cubeElement: document.getElementById(this.getSensorCubeId(sensorName))
                     });
                 }
                 this.log('Sensor added: ' + sensorName);
@@ -298,8 +434,26 @@
                         <div class="angle-label">Yaw: <span class="angle-value" id="${this.getSensorElementId(sensorName, 'yaw')}">0.00°</span></div>
                         <div class="progress-bar"><div class="progress-fill" id="${this.getSensorElementId(sensorName, 'yaw-bar')}" style="width: 50%"></div></div>
                     </div>
+                    <div class="visualization">
+                        <h3>3D Sensor Visualization</h3>
+                        <div class="cube-container">
+                            <div class="cube" id="${this.getSensorCubeId(sensorName)}">
+                                <div class="face front">FRONT</div>
+                                <div class="face back">BACK</div>
+                                <div class="face right">RIGHT</div>
+                                <div class="face left">LEFT</div>
+                                <div class="face top">TOP</div>
+                                <div class="face bottom">BOTTOM</div>
+                            </div>
+                        </div>
+                    </div>
                     <div style="margin-top: 10px; font-size: 0.8em; color: #666;">
                         Last update: <span id="${this.getSensorElementId(sensorName, 'time')}">Just now</span>
+                    </div>
+                    <div class="device-controls">
+                        <button class="btn-success" onclick="sensorMonitor.sendDeviceCommand('${sensorName}', 'SET_ZERO')">Set Zero</button>
+                        <button class="btn-warning" onclick="sensorMonitor.sendDeviceCommand('${sensorName}', 'CALIBRATE')">Calibrate</button>
+                        <button class="btn-danger" onclick="sensorMonitor.sendDeviceCommand('${sensorName}', 'RESET_ANGLES')">Reset</button>
                     </div>
                 `;
                 grid.appendChild(card);
@@ -325,6 +479,11 @@
                     const roll = data.roll || 0;
                     const yaw = data.yaw || 0;
                     
+                    // Сохраняем углы для 3D визуализации
+                    sensor.pitch = pitch;
+                    sensor.roll = roll;
+                    sensor.yaw = yaw;
+                    
                     this.updateAngleDisplay(sensorName, 'pitch', pitch);
                     this.updateAngleDisplay(sensorName, 'roll', roll);
                     this.updateAngleDisplay(sensorName, 'yaw', yaw);
@@ -334,6 +493,9 @@
                     if (timeElement) {
                         timeElement.textContent = new Date().toLocaleTimeString();
                     }
+                    
+                    // Обновляем 3D визуализацию
+                    this.updateCubeVisualization(sensorName);
                     
                     // Обновляем статус
                     this.markSensorActive(sensorName);
@@ -357,6 +519,15 @@
                     // Обновляем прогресс-бар (нормализуем от -180 до 180 до 0-100%)
                     const normalizedValue = Math.max(0, Math.min(100, ((Number(value) + 180) / 360) * 100));
                     barElement.style.width = `${normalizedValue}%`;
+                }
+            }
+
+            updateCubeVisualization(sensorName) {
+                const sensor = this.sensors.get(sensorName);
+                if (sensor && sensor.cubeElement) {
+                    // Применяем вращение к кубу на основе углов датчика
+                    sensor.cubeElement.style.transform = 
+                        `rotateX(${sensor.roll}deg) rotateY(${sensor.yaw}deg) rotateZ(${sensor.pitch}deg)`;
                 }
             }
 
@@ -402,9 +573,28 @@
                 });
             }
 
+            sendDeviceCommand(sensorName, command) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    const message = JSON.stringify({
+                        type: 'device_command',
+                        sensor: sensorName,
+                        command: command
+                    });
+                    this.ws.send(message);
+                    this.log(`Command sent to ${sensorName}: ${command}`);
+                    this.showNotification(`Command sent to ${sensorName}`, 'info');
+                } else {
+                    this.showNotification('Not connected to server', 'error');
+                }
+            }
+
             getSensorCardId(sensorName) {
                 // Создаем безопасный ID для карточки
                 return 'sensor-' + this.escapeHtml(sensorName).replace(/[^a-zA-Z0-9-_]/g, '-');
+            }
+
+            getSensorCubeId(sensorName) {
+                return this.getSensorCardId(sensorName) + '-cube';
             }
 
             getSensorElementId(sensorName, elementType) {
@@ -443,6 +633,18 @@
                 if (logElement.children.length > 50) {
                     logElement.removeChild(logElement.firstChild);
                 }
+            }
+
+            showNotification(message, type) {
+                const notification = document.createElement('div');
+                notification.className = `notification ${type}`;
+                notification.textContent = message;
+                
+                document.body.appendChild(notification);
+                
+                setTimeout(() => {
+                    notification.remove();
+                }, 3000);
             }
 
             startServerTimeUpdate() {
