@@ -136,6 +136,11 @@
             color: #721c24;
         }
         
+        .status-streaming {
+            background: #cce7ff;
+            color: #004085;
+        }
+        
         .data-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -210,6 +215,11 @@
         
         .btn-info {
             background-color: var(--info-color);
+            color: white;
+        }
+        
+        .btn-streaming {
+            background-color: #007bff;
             color: white;
         }
         
@@ -377,6 +387,30 @@
             color: #333;
         }
         
+        .device-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        
+        .send-mode {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 8px;
+            background: #e9ecef;
+        }
+        
+        .mode-movement {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .mode-continuous {
+            background: #cce7ff;
+            color: #004085;
+        }
+        
         @media (max-width: 768px) {
             .devices-grid {
                 grid-template-columns: 1fr;
@@ -421,11 +455,11 @@
                 <div class="status-item" id="devices-count">
                     Устройства: 0
                 </div>
+                <div class="status-item" id="streaming-count">
+                    Потоковые: 0
+                </div>
                 <div class="status-item" id="last-update">
                     Обновлено: -
-                </div>
-                <div class="status-item" id="server-uptime">
-                    Uptime: -
                 </div>
             </div>
         </div>
@@ -451,13 +485,27 @@
                     <div class="info-value" id="free-memory">-</div>
                 </div>
                 <div class="info-item">
-                    <div>Клиенты WiFi</div>
-                    <div class="info-value" id="wifi-clients">-</div>
-                </div>
-                <div class="info-item">
                     <div>Время работы</div>
                     <div class="info-value" id="uptime">-</div>
                 </div>
+                <div class="info-item">
+                    <div>Режим отправки</div>
+                    <div class="info-value" id="send-mode">MOVEMENT</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="advanced-controls">
+            <h2>🔧 Расширенные настройки</h2>
+            <div class="server-controls">
+                <button class="btn-streaming" id="start-stream">🎯 Включить поток</button>
+                <button class="btn-warning" id="stop-stream">⏹️ Выключить поток</button>
+                <button class="btn-info" id="set-rate-100">Частота 100ms</button>
+                <button class="btn-info" id="set-rate-500">Частота 500ms</button>
+                <button class="btn-success" id="broadcast-zero">Установить ноль для всех</button>
+                <button class="btn-warning" id="get-all-data">Получить все данные</button>
+                <button class="btn-danger" id="force-calibration">Принудительная калибровка</button>
+                <button class="btn-info" id="get-device-info">Получить информацию</button>
             </div>
         </div>
 
@@ -502,16 +550,6 @@
             </div>
         </div>
 
-        <div class="advanced-controls">
-            <h2>🔧 Расширенные настройки</h2>
-            <div class="server-controls">
-                <button class="btn-info" id="set-rate-100">Частота 100ms</button>
-                <button class="btn-info" id="set-rate-500">Частота 500ms</button>
-                <button class="btn-success" id="broadcast-zero">Установить ноль для всех</button>
-                <button class="btn-warning" id="get-all-data">Получить все данные</button>
-            </div>
-        </div>
-
         <div class="card">
             <h2>📊 Лог событий</h2>
             <div id="event-log" style="max-height: 300px; overflow-y: auto; background: #f8f9fa; padding: 15px; border-radius: 5px; font-size: 14px;">
@@ -543,28 +581,32 @@
         const refreshBtn = document.getElementById('refresh-btn');
         const serverStatusElement = document.getElementById('server-status');
         const devicesCountElement = document.getElementById('devices-count');
+        const streamingCountElement = document.getElementById('streaming-count');
         const lastUpdateElement = document.getElementById('last-update');
-        const serverUptimeElement = document.getElementById('server-uptime');
         const eventLogElement = document.getElementById('event-log');
         const devicesContainer = document.getElementById('devices-container');
         
-        // Новые элементы управления
+        // Элементы управления сервером
         const getDeviceListBtn = document.getElementById('get-device-list');
         const getServerStatusBtn = document.getElementById('get-server-status');
         const clearInactiveBtn = document.getElementById('clear-inactive');
         const broadcastDataBtn = document.getElementById('broadcast-data');
         const broadcastRecalibrateBtn = document.getElementById('broadcast-recalibrate');
         const broadcastResetBtn = document.getElementById('broadcast-reset');
+        const startStreamBtn = document.getElementById('start-stream');
+        const stopStreamBtn = document.getElementById('stop-stream');
         const setRate100Btn = document.getElementById('set-rate-100');
         const setRate500Btn = document.getElementById('set-rate-500');
         const broadcastZeroBtn = document.getElementById('broadcast-zero');
         const getAllDataBtn = document.getElementById('get-all-data');
+        const forceCalibrationBtn = document.getElementById('force-calibration');
+        const getDeviceInfoBtn = document.getElementById('get-device-info');
 
         // Элементы информации о сервере
         const connectedDevicesElement = document.getElementById('connected-devices');
         const freeMemoryElement = document.getElementById('free-memory');
-        const wifiClientsElement = document.getElementById('wifi-clients');
         const uptimeElement = document.getElementById('uptime');
+        const sendModeElement = document.getElementById('send-mode');
 
         // Инициализация
         function init() {
@@ -574,17 +616,21 @@
             reconnectBtn.addEventListener('click', reconnectToServer);
             refreshBtn.addEventListener('click', refreshData);
             
-            // Установка обработчиков для новых кнопок
+            // Установка обработчиков для кнопок управления сервером
             getDeviceListBtn.addEventListener('click', () => sendCommand('GET_DEVICE_LIST'));
             getServerStatusBtn.addEventListener('click', () => sendCommand('GET_SERVER_STATUS'));
             clearInactiveBtn.addEventListener('click', () => sendCommand('CLEAR_INACTIVE_DEVICES'));
             broadcastDataBtn.addEventListener('click', () => sendCommand('BROADCAST:GET_DATA'));
             broadcastRecalibrateBtn.addEventListener('click', () => sendCommand('BROADCAST:RECALIBRATE'));
             broadcastResetBtn.addEventListener('click', () => sendCommand('BROADCAST:RESET_ANGLES'));
+            startStreamBtn.addEventListener('click', () => sendCommand('START_DATA_STREAM'));
+            stopStreamBtn.addEventListener('click', () => sendCommand('STOP_DATA_STREAM'));
             setRate100Btn.addEventListener('click', () => sendCommand('SET_UPDATE_RATE:100'));
             setRate500Btn.addEventListener('click', () => sendCommand('SET_UPDATE_RATE:500'));
             broadcastZeroBtn.addEventListener('click', () => sendCommand('BROADCAST:SET_CURRENT_AS_ZERO'));
             getAllDataBtn.addEventListener('click', () => sendCommand('GET_ALL_DATA'));
+            forceCalibrationBtn.addEventListener('click', () => sendCommand('FORCE_CALIBRATION'));
+            getDeviceInfoBtn.addEventListener('click', () => sendCommand('GET_DEVICE_INFO_ALL'));
             
             // Добавляем сообщение в лог
             addToLog('Система инициализирована. Готов к подключению.', 'system');
@@ -719,7 +765,12 @@
                          data.includes('CLEARED_DEVICES') ||
                          data.includes('UPDATE_RATE_SET') ||
                          data.includes('COMMAND_SENT') ||
-                         data.includes('BROADCAST_SENT')) {
+                         data.includes('BROADCAST_SENT') ||
+                         data.includes('DATA_STREAM_STARTED') ||
+                         data.includes('DATA_STREAM_STOPPED') ||
+                         data.includes('FORCE_CALIBRATION_SENT') ||
+                         data.includes('RESET_ALL_ANGLES_SENT') ||
+                         data.includes('ALL_ANGLES_RESET')) {
                     handleStatusMessage(data);
                 }
             } catch (error) {
@@ -760,6 +811,14 @@
                     zeroPitch: 0,
                     zeroRoll: 0,
                     zeroYaw: 0,
+                    temperature: 0,
+                    batteryLevel: 100,
+                    signalStrength: 0,
+                    isCalibrating: false,
+                    deviceType: 'MPU6050',
+                    firmwareVersion: '1.0',
+                    dataStreamActive: false,
+                    sendMode: 'MOVEMENT_BASED',
                     lastUpdate: new Date(),
                     cubeElement: null,
                     targetPitch: 0,
@@ -786,6 +845,14 @@
             if (data.ZERO_PITCH) devicesData[deviceId].zeroPitch = parseFloat(data.ZERO_PITCH);
             if (data.ZERO_ROLL) devicesData[deviceId].zeroRoll = parseFloat(data.ZERO_ROLL);
             if (data.ZERO_YAW) devicesData[deviceId].zeroYaw = parseFloat(data.ZERO_YAW);
+            if (data.TEMP) devicesData[deviceId].temperature = parseFloat(data.TEMP);
+            if (data.BATTERY) devicesData[deviceId].batteryLevel = parseInt(data.BATTERY);
+            if (data.RSSI) devicesData[deviceId].signalStrength = parseInt(data.RSSI);
+            if (data.CALIBRATING) devicesData[deviceId].isCalibrating = (data.CALIBRATING === 'true');
+            if (data.DEVICE_TYPE) devicesData[deviceId].deviceType = data.DEVICE_TYPE;
+            if (data.FW_VERSION) devicesData[deviceId].firmwareVersion = data.FW_VERSION;
+            if (data.STREAM_ACTIVE) devicesData[deviceId].dataStreamActive = (data.STREAM_ACTIVE === 'true');
+            if (data.SEND_MODE) devicesData[deviceId].sendMode = data.SEND_MODE;
             
             devicesData[deviceId].lastUpdate = new Date();
             
@@ -811,17 +878,19 @@
             parts.forEach(part => {
                 if (part.startsWith('Uptime:')) {
                     const uptime = parseInt(part.substring(7));
-                    serverUptimeElement.textContent = 'Uptime: ' + formatUptime(uptime);
                     uptimeElement.textContent = formatUptime(uptime);
                 } else if (part.startsWith('ConnectedDevices:')) {
                     const count = parseInt(part.substring(17));
                     connectedDevicesElement.textContent = count;
+                } else if (part.startsWith('StreamingDevices:')) {
+                    const count = parseInt(part.substring(17));
+                    streamingCountElement.textContent = `Потоковые: ${count}`;
                 } else if (part.startsWith('FreeMemory:')) {
                     const memory = parseInt(part.substring(11));
                     freeMemoryElement.textContent = Math.round(memory / 1024) + ' KB';
-                } else if (part.startsWith('WiFiClients:')) {
-                    const clients = parseInt(part.substring(12));
-                    wifiClientsElement.textContent = clients;
+                } else if (part.startsWith('SendMode:')) {
+                    const mode = part.substring(9);
+                    sendModeElement.textContent = mode;
                 }
             });
             
@@ -846,6 +915,16 @@
                 statusText = 'Команда отправлена устройству';
             } else if (message.includes('BROADCAST_SENT:')) {
                 statusText = 'Широковещательная команда отправлена';
+            } else if (message.includes('DATA_STREAM_STARTED')) {
+                statusText = 'Поток данных включен на всех устройствах';
+                type = 'success';
+            } else if (message.includes('DATA_STREAM_STOPPED')) {
+                statusText = 'Поток данных выключен на всех устройствах';
+                type = 'warning';
+            } else if (message.includes('FORCE_CALIBRATION_SENT')) {
+                statusText = 'Принудительная калибровка отправлена';
+            } else if (message.includes('RESET_ALL_ANGLES_SENT')) {
+                statusText = 'Команда сброса углов отправлена';
             } else if (message.includes('ZERO_POINT_SET')) {
                 statusText = 'Ноль установлен';
                 type = 'success';
@@ -876,6 +955,9 @@
                 type = 'error';
             } else if (message.includes('DEVICE_INFO')) {
                 statusText = 'Информация об устройстве получена';
+            } else if (message.includes('ALL_ANGLES_RESET')) {
+                statusText = 'Все углы сброшены';
+                type = 'success';
             }
             
             if (statusText) {
@@ -997,15 +1079,34 @@
                 deviceCard.className = cardClass;
                 deviceCard.innerHTML = `
                     <div class="device-header">
-                        <div class="device-id">${device.deviceId}</div>
-                        <div class="device-status status-connected">Online</div>
+                        <div>
+                            <div class="device-id">${device.deviceId}</div>
+                            <div class="send-mode ${device.sendMode === 'CONTINUOUS' ? 'mode-continuous' : 'mode-movement'}" id="sendMode-${deviceId}">
+                                ${device.sendMode}
+                            </div>
+                        </div>
+                        <div class="device-status ${device.dataStreamActive ? 'status-streaming' : 'status-connected'}" id="status-${deviceId}">
+                            ${device.dataStreamActive ? 'Streaming' : 'Connected'}
+                        </div>
+                    </div>
+                    <div class="device-info">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px;">
+                            <span><strong>Type:</strong> <span id="deviceType-${deviceId}">${device.deviceType}</span></span>
+                            <span><strong>Firmware:</strong> <span id="fwVersion-${deviceId}">${device.firmwareVersion}</span></span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; margin-top: 5px;">
+                            <span><strong>Battery:</strong> <span id="battery-${deviceId}" class="${getBatteryClass(device.batteryLevel)}">${device.batteryLevel}%</span></span>
+                            <span><strong>Temp:</strong> <span id="temp-${deviceId}">${device.temperature.toFixed(1)}°C</span></span>
+                            <span><strong>Signal:</strong> <span id="signal-${deviceId}">${device.signalStrength} dBm</span></span>
+                        </div>
                     </div>
                     <div class="data-grid" id="data-grid-${deviceId}">
+                        <div><strong>Absolute Angles</strong></div><div><strong>Relative Angles</strong></div>
                         <div class="data-item"><span class="data-label">Pitch:</span><span class="data-value" id="pitch-${deviceId}">${device.currentPitch.toFixed(1)}°</span></div>
-                        <div class="data-item"><span class="data-label">Roll:</span><span class="data-value" id="roll-${deviceId}">${device.currentRoll.toFixed(1)}°</span></div>
-                        <div class="data-item"><span class="data-label">Yaw:</span><span class="data-value" id="yaw-${deviceId}">${device.currentYaw.toFixed(1)}°</span></div>
                         <div class="data-item"><span class="data-label">Rel Pitch:</span><span class="data-value" id="rel-pitch-${deviceId}">${device.relPitch.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Roll:</span><span class="data-value" id="roll-${deviceId}">${device.currentRoll.toFixed(1)}°</span></div>
                         <div class="data-item"><span class="data-label">Rel Roll:</span><span class="data-value" id="rel-roll-${deviceId}">${device.relRoll.toFixed(2)}°</span></div>
+                        <div class="data-item"><span class="data-label">Yaw:</span><span class="data-value" id="yaw-${deviceId}">${device.currentYaw.toFixed(1)}°</span></div>
                         <div class="data-item"><span class="data-label">Rel Yaw:</span><span class="data-value" id="rel-yaw-${deviceId}">${device.relYaw.toFixed(2)}°</span></div>
                         <div class="data-item"><span class="data-label">Acc Pitch:</span><span class="data-value" id="acc-pitch-${deviceId}">${device.accPitch.toFixed(2)}°</span></div>
                         <div class="data-item"><span class="data-label">Acc Roll:</span><span class="data-value" id="acc-roll-${deviceId}">${device.accRoll.toFixed(2)}°</span></div>
@@ -1042,7 +1143,8 @@
                         <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'RECALIBRATE')">Калибровать</button>
                         <button class="btn-danger" onclick="sendDeviceCommand('${deviceId}', 'RESET_ANGLES')">Сбросить углы</button>
                         <button class="btn-info" onclick="sendDeviceCommand('${deviceId}', 'GET_INFO')">Информация</button>
-                        <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'GET_DATA')">Обновить</button>
+                        <button class="btn-streaming" onclick="sendDeviceCommand('${deviceId}', 'START_STREAM')">Включить поток</button>
+                        <button class="btn-warning" onclick="sendDeviceCommand('${deviceId}', 'STOP_STREAM')">Выключить поток</button>
                     </div>
                 `;
                 
@@ -1057,6 +1159,12 @@
                         `rotateX(${device.currentRoll}deg) rotateY(${device.currentYaw}deg) rotateZ(${device.currentPitch}deg)`;
                 }
             }
+        }
+        
+        function getBatteryClass(level) {
+            if (level < 20) return 'battery-low';
+            if (level < 50) return 'battery-medium';
+            return 'battery-high';
         }
         
         function updateDeviceDataDisplay(deviceId) {
@@ -1077,7 +1185,14 @@
                 { id: `zero-set-${deviceId}`, value: device.zeroSet ? 'true' : 'false' },
                 { id: `zero-pitch-${deviceId}`, value: device.zeroPitch ? device.zeroPitch.toFixed(2) + '°' : 'N/A' },
                 { id: `zero-roll-${deviceId}`, value: device.zeroRoll ? device.zeroRoll.toFixed(2) + '°' : 'N/A' },
-                { id: `zero-yaw-${deviceId}`, value: device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A' }
+                { id: `zero-yaw-${deviceId}`, value: device.zeroYaw ? device.zeroYaw.toFixed(2) + '°' : 'N/A' },
+                { id: `deviceType-${deviceId}`, value: device.deviceType },
+                { id: `fwVersion-${deviceId}`, value: device.firmwareVersion },
+                { id: `battery-${deviceId}`, value: device.batteryLevel + '%' },
+                { id: `temp-${deviceId}`, value: device.temperature.toFixed(1) + '°C' },
+                { id: `signal-${deviceId}`, value: device.signalStrength + ' dBm' },
+                { id: `sendMode-${deviceId}`, value: device.sendMode },
+                { id: `status-${deviceId}`, value: device.dataStreamActive ? 'Streaming' : 'Connected' }
             ];
             
             elements.forEach(element => {
@@ -1087,6 +1202,15 @@
                     if (element.id.includes('zero-set')) {
                         el.style.color = device.zeroSet ? '#28a745' : '#dc3545';
                     }
+                    if (element.id.includes('battery')) {
+                        el.className = getBatteryClass(device.batteryLevel);
+                    }
+                    if (element.id.includes('sendMode')) {
+                        el.className = `send-mode ${device.sendMode === 'CONTINUOUS' ? 'mode-continuous' : 'mode-movement'}`;
+                    }
+                    if (element.id.includes('status')) {
+                        el.className = `device-status ${device.dataStreamActive ? 'status-streaming' : 'status-connected'}`;
+                    }
                 }
             });
         }
@@ -1094,6 +1218,10 @@
         function updateDevicesCount() {
             const count = Object.keys(devicesData).length;
             devicesCountElement.textContent = `Устройства: ${count}`;
+            
+            // Обновляем счетчик потоковых устройств
+            const streamingCount = Object.values(devicesData).filter(device => device.dataStreamActive).length;
+            streamingCountElement.textContent = `Потоковые: ${streamingCount}`;
         }
         
         function selectDevice(deviceId) {
@@ -1131,7 +1259,10 @@
                 'RESET_ZERO': 'Сбросить ноль',
                 'GET_DATA': 'Получить данные',
                 'GET_INFO': 'Получить информацию',
-                'SET_ZERO': 'Установить ноль'
+                'SET_ZERO': 'Установить ноль',
+                'START_STREAM': 'Включить поток',
+                'STOP_STREAM': 'Выключить поток',
+                'FORCE_CALIBRATE': 'Принудительная калибровка'
             };
             return commandNames[command] || command;
         }

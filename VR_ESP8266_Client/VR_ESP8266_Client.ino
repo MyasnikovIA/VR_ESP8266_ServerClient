@@ -17,6 +17,9 @@ const uint16_t websocket_port = 81;
 // Sensor data
 float pitch = 0, roll = 0, yaw = 0;
 float lastSentPitch = 0, lastSentRoll = 0, lastSentYaw = 0;
+// ДОБАВЛЕНО: переменные для хранения последних отправленных относительных углов
+double lastSentRelPitch = 0, lastSentRelRoll = 0, lastSentRelYaw = 0;
+
 float gyroOffsetX = 0, gyroOffsetY = 0, gyroOffsetZ = 0;
 bool calibrated = false;
 unsigned long lastTime = 0;
@@ -37,14 +40,19 @@ unsigned long lastConnectionAttempt = 0;
 const unsigned long RECONNECT_INTERVAL = 5000; // 5 секунд
 
 // Настройки отправки данных
-const unsigned long SEND_INTERVAL = 50;
-const float CHANGE_THRESHOLD = 1.0;
+const unsigned long SEND_INTERVAL = 50; // Минимальный интервал между отправками
+const float CHANGE_THRESHOLD = 0.5;     // Порог изменения для отправки (градусы)
+const unsigned long FORCE_SEND_INTERVAL = 1000; // Принудительная отправка раз в секунду
 
 // Уникальный ID устройства
 String deviceId = "VR_Head_" + String(ESP.getChipId());
 
 // Временная строка для отправки сообщений
 String tempMessage = "";
+
+// Переменные для отслеживания изменений
+unsigned long lastForceSend = 0;
+bool movementDetected = false;
 
 // НОВАЯ ФУНКЦИЯ: Обнуление всех углов
 void resetAllAngles() {
@@ -58,6 +66,13 @@ void resetAllAngles() {
   prevRoll = 0;
   prevYaw = 0;
   firstMeasurement = true;
+  lastSentPitch = 0;
+  lastSentRoll = 0;
+  lastSentYaw = 0;
+  // ДОБАВЛЕНО: сброс относительных углов
+  lastSentRelPitch = 0;
+  lastSentRelRoll = 0;
+  lastSentRelYaw = 0;
   
   Serial.println("All angles reset to zero");
   if (wsConnected) {
@@ -173,6 +188,27 @@ void calibrateSensor() {
   Serial.println("Calibration complete");
 }
 
+// НОВАЯ ФУНКЦИЯ: Проверка изменения данных
+bool dataChangedSignificantly() {
+  // Получаем текущие относительные углы
+  double currentRelPitch = getRelativePitch();
+  double currentRelRoll = getRelativeRoll();
+  double currentRelYaw = getRelativeYaw();
+  
+  // Проверяем изменение абсолютных углов
+  bool pitchChanged = abs(pitch - lastSentPitch) >= CHANGE_THRESHOLD;
+  bool rollChanged = abs(roll - lastSentRoll) >= CHANGE_THRESHOLD;
+  bool yawChanged = abs(yaw - lastSentYaw) >= CHANGE_THRESHOLD;
+  
+  // Проверяем изменение относительных углов
+  // Для относительных углов используем более строгий порог
+  bool relPitchChanged = abs(currentRelPitch - lastSentRelPitch) >= (CHANGE_THRESHOLD * 0.5);
+  bool relRollChanged = abs(currentRelRoll - lastSentRelRoll) >= (CHANGE_THRESHOLD * 0.5);
+  bool relYawChanged = abs(currentRelYaw - lastSentRelYaw) >= (CHANGE_THRESHOLD * 0.5);
+  
+  return pitchChanged || rollChanged || yawChanged || relPitchChanged || relRollChanged || relYawChanged;
+}
+
 void sendSensorData() {
   if (!wsConnected) return;
   
@@ -200,17 +236,49 @@ void sendSensorData() {
                 ",ZERO_YAW:" + String(zeroYawOffset, 2);
   
   webSocket.sendTXT(tempMessage);
+  
+  // Обновляем последние отправленные значения
   lastSentPitch = pitch;
   lastSentRoll = roll;
   lastSentYaw = yaw;
+  lastSentRelPitch = relPitch;
+  lastSentRelRoll = relRoll;
+  lastSentRelYaw = relYaw;
   
-  Serial.println("Data sent: " + tempMessage);
+  movementDetected = true;
+  
+  // Выводим в Serial только если данные действительно изменились
+  static unsigned long lastSerialPrint = 0;
+  if (millis() - lastSerialPrint > 1000) {
+    Serial.println("Data sent: " + tempMessage);
+    lastSerialPrint = millis();
+  }
 }
 
-bool dataChanged() {
-  return (abs(pitch - lastSentPitch) >= CHANGE_THRESHOLD ||
-          abs(roll - lastSentRoll) >= CHANGE_THRESHOLD ||
-          abs(yaw - lastSentYaw) >= CHANGE_THRESHOLD);
+// НОВАЯ ФУНКЦИЯ: Отправка данных только при движении
+void sendDataIfChanged() {
+  static unsigned long lastSendTime = 0;
+  unsigned long currentTime = millis();
+  
+  // Проверяем минимальный интервал между отправками
+  if (currentTime - lastSendTime < SEND_INTERVAL) {
+    return;
+  }
+  
+  // Проверяем значительное изменение данных
+  bool shouldSend = dataChangedSignificantly();
+  
+  // Принудительная отправка раз в секунду (даже если нет движения)
+  bool forceSend = (currentTime - lastForceSend >= FORCE_SEND_INTERVAL);
+  
+  if (shouldSend || forceSend) {
+    sendSensorData();
+    lastSendTime = currentTime;
+    
+    if (forceSend) {
+      lastForceSend = currentTime;
+    }
+  }
 }
 
 // Обработка событий WebSocket
@@ -228,6 +296,15 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         // Отправляем идентификацию при подключении
         tempMessage = "CLIENT_ID:" + deviceId;
         webSocket.sendTXT(tempMessage);
+        
+        // Сбрасываем последние отправленные значения для принудительной отправки
+        lastSentPitch = pitch;
+        lastSentRoll = roll;
+        lastSentYaw = yaw;
+        lastSentRelPitch = getRelativePitch();
+        lastSentRelRoll = getRelativeRoll();
+        lastSentRelYaw = getRelativeYaw();
+        
         sendSensorData(); // Отправляем данные сразу после подключения
       }
       break;
@@ -235,7 +312,6 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     case WStype_TEXT:
       {
         String message = String((char*)payload);
-        // УБРАНО: Serial.printf("Received from server: %s\n", message);
         
         if (message == "GET_DATA") {
           sendSensorData();
@@ -284,6 +360,29 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
           tempMessage = "ALL_ANGLES_RESET:" + deviceId;
           webSocket.sendTXT(tempMessage);
           sendSensorData();
+        }
+        // НОВАЯ КОМАНДА: Включить/выключить поток данных
+        else if (message == "START_STREAM") {
+          Serial.println("Continuous data stream started");
+          movementDetected = true; // Принудительно отправляем данные
+          tempMessage = "DATA_SENDING_STARTED:" + deviceId;
+          webSocket.sendTXT(tempMessage);
+        }
+        else if (message == "STOP_STREAM") {
+          Serial.println("Continuous data stream stopped");
+          movementDetected = false;
+          tempMessage = "DATA_SENDING_STOPPED:" + deviceId;
+          webSocket.sendTXT(tempMessage);
+        }
+        // НОВАЯ КОМАНДА: Получить информацию об устройстве
+        else if (message == "GET_INFO") {
+          Serial.println("Device info requested");
+          tempMessage = "DEVICE_INFO:ID:" + deviceId + 
+                       ",TYPE:MPU6050" +
+                       ",FW_VERSION:2.0" +
+                       ",SEND_MODE:MOVEMENT_BASED" +
+                       ",THRESHOLD:" + String(CHANGE_THRESHOLD, 1);
+          webSocket.sendTXT(tempMessage);
         }
       }
       break;
@@ -352,6 +451,8 @@ void setup() {
   Serial.println();
   Serial.println("VR MPU6050 Client Starting...");
   Serial.println("Device ID: " + deviceId);
+  Serial.println("Send Mode: Movement-based (optimized)");
+  Serial.println("Change Threshold: " + String(CHANGE_THRESHOLD, 1) + " degrees");
   
   // Инициализация I2C и MPU6050
   Wire.begin();
@@ -377,9 +478,10 @@ void setup() {
   calibrateSensor();
   
   lastConnectionAttempt = millis();
+  lastForceSend = millis();
   
   Serial.println("VR MPU6050 Client started");
-  Serial.println("Ready to send sensor data to server");
+  Serial.println("Ready to send sensor data to server (movement-based)");
   Serial.println("Available commands from server:");
   Serial.println("  - SET_ZERO: Set current position as zero point");
   Serial.println("  - SET_CURRENT_AS_ZERO: Set current position as zero point (alternative)");
@@ -389,6 +491,9 @@ void setup() {
   Serial.println("  - RECALIBRATE: Recalibrate sensor");
   Serial.println("  - RESET_ANGLES: Reset all angles");
   Serial.println("  - GET_DATA: Request current sensor data");
+  Serial.println("  - START_STREAM: Start continuous data stream");
+  Serial.println("  - STOP_STREAM: Stop continuous data stream");
+  Serial.println("  - GET_INFO: Get device information");
 }
 
 void loop() {
@@ -436,20 +541,13 @@ void loop() {
   if (yaw > 180) yaw -= 360;
   else if (yaw < -180) yaw += 360;
   
-  // Отправка данных с интервалом (только если подключены)
+  // Отправка данных только при изменении положения (если подключены)
   if (wsConnected) {
-    static unsigned long lastSend = 0;
-    
-    if (currentTime - lastSend >= SEND_INTERVAL) {
-      if (dataChanged() || lastSend == 0) {
-        sendSensorData();
-        lastSend = currentTime;
-      }
-    }
+    sendDataIfChanged();
   } else {
     // Если не подключены, выводим статус каждые 10 секунд
     static unsigned long lastStatus = 0;
-    if (millis() - lastStatus > 1000) {
+    if (millis() - lastStatus > 10000) {
       Serial.println("Waiting for connection to server...");
       Serial.print("WiFi: ");
       Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
