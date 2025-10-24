@@ -32,6 +32,13 @@ struct ClientData {
   float zeroYaw = 0;      // ДОБАВЛЕНО: нулевые точки
   unsigned long lastUpdate = 0;
   bool connected = false;
+  // ДОБАВЛЕНО: новые поля из клиента
+  float temperature = 0;
+  int batteryLevel = 100;
+  int signalStrength = 0;
+  bool isCalibrating = false;
+  String deviceType = "MPU6050";
+  String firmwareVersion = "1.0";
 };
 
 // Максимальное количество клиентов
@@ -104,6 +111,13 @@ void updateClientData(String deviceId, String data) {
       else if (key == "ZERO_PITCH") clients[clientIndex].zeroPitch = value.toFloat();
       else if (key == "ZERO_ROLL") clients[clientIndex].zeroRoll = value.toFloat();
       else if (key == "ZERO_YAW") clients[clientIndex].zeroYaw = value.toFloat();
+      // ДОБАВЛЕНО: парсинг новых данных из клиента
+      else if (key == "TEMP") clients[clientIndex].temperature = value.toFloat();
+      else if (key == "BATTERY") clients[clientIndex].batteryLevel = value.toInt();
+      else if (key == "RSSI") clients[clientIndex].signalStrength = value.toInt();
+      else if (key == "CALIBRATING") clients[clientIndex].isCalibrating = (value == "true");
+      else if (key == "DEVICE_TYPE") clients[clientIndex].deviceType = value;
+      else if (key == "FW_VERSION") clients[clientIndex].firmwareVersion = value;
     }
     
     start = end + 1;
@@ -131,6 +145,13 @@ void updateClientData(String deviceId, String data) {
     else if (key == "ZERO_PITCH") clients[clientIndex].zeroPitch = value.toFloat();
     else if (key == "ZERO_ROLL") clients[clientIndex].zeroRoll = value.toFloat();
     else if (key == "ZERO_YAW") clients[clientIndex].zeroYaw = value.toFloat();
+    // ДОБАВЛЕНО: парсинг новых данных из клиента
+    else if (key == "TEMP") clients[clientIndex].temperature = value.toFloat();
+    else if (key == "BATTERY") clients[clientIndex].batteryLevel = value.toInt();
+    else if (key == "RSSI") clients[clientIndex].signalStrength = value.toInt();
+    else if (key == "CALIBRATING") clients[clientIndex].isCalibrating = (value == "true");
+    else if (key == "DEVICE_TYPE") clients[clientIndex].deviceType = value;
+    else if (key == "FW_VERSION") clients[clientIndex].firmwareVersion = value;
   }
 }
 
@@ -164,7 +185,14 @@ void broadcastData() {
                    // ДОБАВЛЕНО: отправка нулевых точек
                    ",ZERO_PITCH:" + String(clients[i].zeroPitch, 2) +
                    ",ZERO_ROLL:" + String(clients[i].zeroRoll, 2) +
-                   ",ZERO_YAW:" + String(clients[i].zeroYaw, 2);
+                   ",ZERO_YAW:" + String(clients[i].zeroYaw, 2) +
+                   // ДОБАВЛЕНО: отправка новых данных
+                   ",TEMP:" + String(clients[i].temperature, 1) +
+                   ",BATTERY:" + String(clients[i].batteryLevel) +
+                   ",RSSI:" + String(clients[i].signalStrength) +
+                   ",CALIBRATING:" + String(clients[i].isCalibrating ? "true" : "false") +
+                   ",DEVICE_TYPE:" + clients[i].deviceType +
+                   ",FW_VERSION:" + clients[i].firmwareVersion;
       webSocket.broadcastTXT(data);
     }
   }
@@ -300,6 +328,27 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             webSocket.sendTXT(num, rateMsg);
             Serial.println("Update rate info: " + rate + "ms");
           }
+          // ДОБАВЛЕНО: Новые команды управления
+          else if (command == "START_DATA_STREAM") {
+            webSocket.broadcastTXT("START_STREAM");
+            String response = "DATA_STREAM_STARTED";
+            webSocket.sendTXT(num, response);
+          }
+          else if (command == "STOP_DATA_STREAM") {
+            webSocket.broadcastTXT("STOP_STREAM");
+            String response = "DATA_STREAM_STOPPED";
+            webSocket.sendTXT(num, response);
+          }
+          else if (command == "FORCE_CALIBRATION") {
+            webSocket.broadcastTXT("FORCE_CALIBRATE");
+            String response = "FORCE_CALIBRATION_SENT";
+            webSocket.sendTXT(num, response);
+          }
+          else if (command == "GET_DEVICE_INFO_ALL") {
+            webSocket.broadcastTXT("GET_INFO");
+            String response = "DEVICE_INFO_REQUEST_SENT";
+            webSocket.sendTXT(num, response);
+          }
         }
         // Обработка статусных сообщений от клиентов MPU6050
         else if (message.startsWith("CLIENT_ID:") || 
@@ -316,7 +365,10 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                  message.startsWith("DATA_SENDING_STOPPED:") ||
                  message.startsWith("DEVICE_READY:") ||
                  message.startsWith("LOW_BATTERY:") ||
-                 message.startsWith("SENSOR_ERROR:")) {
+                 message.startsWith("SENSOR_ERROR:") ||
+                 message.startsWith("STREAM_STARTED:") ||
+                 message.startsWith("STREAM_STOPPED:") ||
+                 message.startsWith("CALIBRATION_PROGRESS:")) {
           // Пересылаем статусные сообщения всем веб-клиентам
           webSocket.broadcastTXT(message);
           Serial.println("Status message broadcasted: " + message);
@@ -326,6 +378,11 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           // Пересылаем информацию об устройстве всем веб-клиентам
           webSocket.broadcastTXT(message);
           Serial.println("Device info broadcasted: " + message);
+        }
+        // ДОБАВЛЕНО: Обработка данных потока от клиентов
+        else if (message.startsWith("DATA_STREAM:")) {
+          // Пересылаем потоковые данные всем веб-клиентам
+          webSocket.broadcastTXT(message);
         }
       }
       break;
@@ -355,7 +412,7 @@ void handleRoot() {
   html += "body { font-family: Arial; margin: 20px; background: #f5f5f5; }";
   html += ".container { max-width: 1200px; margin: 0 auto; }";
   html += ".header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 15px; margin-bottom: 20px; }";
-  html += ".clients-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-bottom: 20px; }";
+  html += ".clients-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-bottom: 20px; }";
   html += ".client-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }";
   html += ".client-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #f0f0f0; }";
   html += ".client-id { font-size: 18px; font-weight: bold; color: #333; }";
@@ -366,6 +423,7 @@ void handleRoot() {
   html += ".data-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }";
   html += ".data-label { font-weight: bold; color: #666; }";
   html += ".data-value { font-weight: bold; color: #333; }";
+  html += ".device-info { background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 10px 0; }";
   html += ".controls { background: #e8f5e8; padding: 20px; border-radius: 10px; margin: 20px 0; }";
   html += "button { padding: 10px 15px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }";
   html += ".btn-primary { background: #007bff; color: white; }";
@@ -373,11 +431,16 @@ void handleRoot() {
   html += ".btn-warning { background: #ffc107; color: black; }";
   html += ".btn-danger { background: #dc3545; color: white; }";
   html += ".btn-info { background: #17a2b8; color: white; }";
+  html += ".btn-secondary { background: #6c757d; color: white; }";
   html += ".server-info { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }";
   html += ".connection-status { padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; }";
   html += ".connected { background: #d4edda; color: #155724; border: 2px solid #c3e6cb; }";
   html += ".disconnected { background: #f8d7da; color: #721c24; border: 2px solid #f5c6cb; }";
   html += ".advanced-controls { background: #e3f2fd; padding: 20px; border-radius: 10px; margin: 20px 0; }";
+  html += ".stream-controls { background: #fff3cd; padding: 20px; border-radius: 10px; margin: 20px 0; }";
+  html += ".battery-low { color: #dc3545; font-weight: bold; }";
+  html += ".battery-medium { color: #ffc107; font-weight: bold; }";
+  html += ".battery-high { color: #28a745; font-weight: bold; }";
   html += "</style>";
   html += "</head><body>";
   html += "<div class=\"container\">";
@@ -393,6 +456,13 @@ void handleRoot() {
   html += "<p><strong>WebSocket Port:</strong> 81</p>";
   html += "<p><strong>Connected Devices:</strong> <span id=\"connectedCount\">0</span></p>";
   html += "<p><strong>Server Uptime:</strong> <span id=\"serverUptime\">0</span> ms</p>";
+  html += "</div>";
+  html += "<div class=\"stream-controls\">";
+  html += "<h3>📊 Data Stream Controls</h3>";
+  html += "<button class=\"btn-success\" onclick=\"sendCommand('START_DATA_STREAM')\">Start Data Stream</button>";
+  html += "<button class=\"btn-danger\" onclick=\"sendCommand('STOP_DATA_STREAM')\">Stop Data Stream</button>";
+  html += "<button class=\"btn-warning\" onclick=\"sendCommand('FORCE_CALIBRATION')\">Force Calibration All</button>";
+  html += "<button class=\"btn-info\" onclick=\"sendCommand('GET_DEVICE_INFO_ALL')\">Get All Device Info</button>";
   html += "</div>";
   html += "<div class=\"controls\">";
   html += "<h3>🛠️ Server Controls</h3>";
@@ -475,6 +545,15 @@ void handleRoot() {
   html += "else if (event.data.startsWith('LOW_BATTERY:')) {";
   html += "showNotification('Low battery warning: ' + event.data.substring(12), 'error');";
   html += "}";
+  html += "else if (event.data.startsWith('DATA_STREAM_STARTED')) {";
+  html += "showNotification('Data stream started on all devices', 'success');";
+  html += "}";
+  html += "else if (event.data.startsWith('DATA_STREAM_STOPPED')) {";
+  html += "showNotification('Data stream stopped on all devices', 'warning');";
+  html += "}";
+  html += "else if (event.data.startsWith('FORCE_CALIBRATION_SENT')) {";
+  html += "showNotification('Force calibration sent to all devices', 'info');";
+  html += "}";
   html += "};";
   html += "ws.onclose = function() {";
   html += "console.log('WebSocket disconnected');";
@@ -510,27 +589,37 @@ void handleRoot() {
   html += "<div class=\\\"client-id\\\">${clientId}</div>";
   html += "<div class=\\\"client-status status-connected\\\" id=\\\"status-${clientId}\\\">Connected</div>";
   html += "</div>";
+  html += "<div class=\\\"device-info\\\">";
+  html += "<div style=\\\"display: flex; justify-content: space-between; font-size: 12px;\\\">";
+  html += "<span><strong>Type:</strong> <span id=\\\"deviceType-${clientId}\\\">MPU6050</span></span>";
+  html += "<span><strong>Firmware:</strong> <span id=\\\"fwVersion-${clientId}\\\">1.0</span></span>";
+  html += "</div>";
+  html += "<div style=\\\"display: flex; justify-content: space-between; font-size: 12px; margin-top: 5px;\\\">";
+  html += "<span><strong>Battery:</strong> <span id=\\\"battery-${clientId}\\\">100%</span></span>";
+  html += "<span><strong>Temp:</strong> <span id=\\\"temp-${clientId}\\\">0°C</span></span>";
+  html += "<span><strong>Signal:</strong> <span id=\\\"signal-${clientId}\\\">0 dBm</span></span>";
+  html += "</div>";
+  html += "</div>";
   html += "<div class=\\\"data-grid\\\">";
+  html += "<div><strong>Absolute Angles</strong></div><div><strong>Relative Angles</strong></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Pitch:</span><span class=\\\"data-value\\\" id=\\\"pitch-${clientId}\\\">0°</span></div>";
-  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Roll:</span><span class=\\\"data-value\\\" id=\\\"roll-${clientId}\\\">0°</span></div>";
-  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Yaw:</span><span class=\\\"data-value\\\" id=\\\"yaw-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Rel Pitch:</span><span class=\\\"data-value\\\" id=\\\"relPitch-${clientId}\\\">0°</span></div>";
+  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Roll:</span><span class=\\\"data-value\\\" id=\\\"roll-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Rel Roll:</span><span class=\\\"data-value\\\" id=\\\"relRoll-${clientId}\\\">0°</span></div>";
+  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Yaw:</span><span class=\\\"data-value\\\" id=\\\"yaw-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Rel Yaw:</span><span class=\\\"data-value\\\" id=\\\"relYaw-${clientId}\\\">0°</span></div>";
-  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Acc Pitch:</span><span class=\\\"data-value\\\" id=\\\"accPitch-${clientId}\\\">0°</span></div>";
-  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Acc Roll:</span><span class=\\\"data-value\\\" id=\\\"accRoll-${clientId}\\\">0°</span></div>";
-  html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Acc Yaw:</span><span class=\\\"data-value\\\" id=\\\"accYaw-${clientId}\\\">0°</span></div>";
+  html += "</div>";
+  html += "<div style=\\\"margin-top: 15px; padding-top: 10px; border-top: 1px solid #f0f0f0;\\\">";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Set:</span><span class=\\\"data-value\\\" id=\\\"zeroSet-${clientId}\\\">false</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Pitch:</span><span class=\\\"data-value\\\" id=\\\"zeroPitch-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Roll:</span><span class=\\\"data-value\\\" id=\\\"zeroRoll-${clientId}\\\">0°</span></div>";
   html += "<div class=\\\"data-item\\\"><span class=\\\"data-label\\\">Zero Yaw:</span><span class=\\\"data-value\\\" id=\\\"zeroYaw-${clientId}\\\">0°</span></div>";
   html += "</div>";
-  html += "<div style=\\\"margin-top: 15px;\\\">";
-  html += "<button class=\\\"btn-primary\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'GET_DATA')\\\">Get Data</button>";
-  html += "<button class=\\\"btn-warning\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RECALIBRATE')\\\">Recalibrate</button>";
-  html += "<button class=\\\"btn-success\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'SET_CURRENT_AS_ZERO')\\\">Fix Current Position as Zero</button>";
-  html += "<button class=\\\"btn-danger\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RESET_ZERO')\\\">Reset Zero</button>";
-  html += "<button class=\\\"btn-info\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'GET_INFO')\\\">Get Device Info</button>";
+  html += "<div style=\\\"margin-top: 15px; display: flex; flex-wrap: wrap; gap: 5px;\\\">";
+  html += "<button class=\\\"btn-success\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RECALIBRATE')\\\">Recalibrate</button>";
+  html += "<button class=\\\"btn-warning\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RESET_ANGLES')\\\">Reset Angles</button>";
+  html += "<button class=\\\"btn-info\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'SET_CURRENT_AS_ZERO')\\\">Set Current as Zero</button>";
+  html += "<button class=\\\"btn-danger\\\" onclick=\\\"sendDeviceCommand('${clientId}', 'RESET_ZERO_POINT')\\\">Reset Zero</button>";
   html += "</div>";
   html += "`;";
   html += "container.appendChild(card);";
@@ -538,20 +627,29 @@ void handleRoot() {
   html += "function updateClientDisplay(clientId) {";
   html += "const client = clients[clientId];";
   html += "if (!client) return;";
-  html += "document.getElementById(`pitch-${clientId}`).textContent = client.PITCH + '°';";
-  html += "document.getElementById(`roll-${clientId}`).textContent = client.ROLL + '°';";
-  html += "document.getElementById(`yaw-${clientId}`).textContent = client.YAW + '°';";
-  html += "document.getElementById(`relPitch-${clientId}`).textContent = client.REL_PITCH + '°';";
-  html += "document.getElementById(`relRoll-${clientId}`).textContent = client.REL_ROLL + '°';";
-  html += "document.getElementById(`relYaw-${clientId}`).textContent = client.REL_YAW + '°';";
-  html += "document.getElementById(`accPitch-${clientId}`).textContent = client.ACC_PITCH + '°';";
-  html += "document.getElementById(`accRoll-${clientId}`).textContent = client.ACC_ROLL + '°';";
-  html += "document.getElementById(`accYaw-${clientId}`).textContent = client.ACC_YAW + '°';";
-  html += "document.getElementById(`zeroSet-${clientId}`).textContent = client.ZERO_SET;";
-  html += "document.getElementById(`zeroSet-${clientId}`).style.color = client.ZERO_SET === 'true' ? '#28a745' : '#dc3545';";
-  html += "document.getElementById(`zeroPitch-${clientId}`).textContent = client.ZERO_PITCH + '°';";
-  html += "document.getElementById(`zeroRoll-${clientId}`).textContent = client.ZERO_ROLL + '°';";
-  html += "document.getElementById(`zeroYaw-${clientId}`).textContent = client.ZERO_YAW + '°';";
+  html += "document.getElementById('pitch-' + clientId).textContent = client.PITCH + '°';";
+  html += "document.getElementById('roll-' + clientId).textContent = client.ROLL + '°';";
+  html += "document.getElementById('yaw-' + clientId).textContent = client.YAW + '°';";
+  html += "document.getElementById('relPitch-' + clientId).textContent = client.REL_PITCH + '°';";
+  html += "document.getElementById('relRoll-' + clientId).textContent = client.REL_ROLL + '°';";
+  html += "document.getElementById('relYaw-' + clientId).textContent = client.REL_YAW + '°';";
+  html += "document.getElementById('zeroSet-' + clientId).textContent = client.ZERO_SET;";
+  html += "document.getElementById('zeroPitch-' + clientId).textContent = client.ZERO_PITCH + '°';";
+  html += "document.getElementById('zeroRoll-' + clientId).textContent = client.ZERO_ROLL + '°';";
+  html += "document.getElementById('zeroYaw-' + clientId).textContent = client.ZERO_YAW + '°';";
+  html += "// ДОБАВЛЕНО: обновление новых полей";
+  html += "if (client.DEVICE_TYPE) document.getElementById('deviceType-' + clientId).textContent = client.DEVICE_TYPE;";
+  html += "if (client.FW_VERSION) document.getElementById('fwVersion-' + clientId).textContent = client.FW_VERSION;";
+  html += "if (client.BATTERY) {";
+  html += "const battery = parseInt(client.BATTERY);";
+  html += "const batteryElement = document.getElementById('battery-' + clientId);";
+  html += "batteryElement.textContent = battery + '%';";
+  html += "if (battery < 20) batteryElement.className = 'battery-low';";
+  html += "else if (battery < 50) batteryElement.className = 'battery-medium';";
+  html += "else batteryElement.className = 'battery-high';";
+  html += "}";
+  html += "if (client.TEMP) document.getElementById('temp-' + clientId).textContent = client.TEMP + '°C';";
+  html += "if (client.RSSI) document.getElementById('signal-' + clientId).textContent = client.RSSI + ' dBm';";
   html += "}";
   html += "function updateConnectedCount() {";
   html += "const count = Object.keys(clients).length;";
@@ -566,10 +664,15 @@ void handleRoot() {
   html += "}";
   html += "}";
   html += "function sendDeviceCommand(deviceId, command) {";
-  html += "sendCommand('SEND_TO_DEVICE:' + deviceId + ':' + command);";
+  html += "if (ws && ws.readyState === WebSocket.OPEN) {";
+  html += "ws.send('CMD:SEND_TO_DEVICE:' + deviceId + ':' + command);";
+  html += "console.log('Sent command to device:', deviceId, command);";
+  html += "} else {";
+  html += "console.error('WebSocket not connected');";
+  html += "}";
   html += "}";
   html += "function showNotification(message, type) {";
-  html += "console.log(type + ': ' + message);";
+  html += "console.log('Notification:', message, type);";
   html += "}";
   html += "connectWebSocket();";
   html += "setInterval(() => {";
@@ -581,121 +684,111 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+// API endpoint для получения данных в формате JSON
+void handleApiData() {
+  addCORSHeaders();
+  
+  DynamicJsonDocument doc(4096);
+  JsonArray clientsArray = doc.to<JsonArray>();
+  
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].connected) {
+      JsonObject client = clientsArray.createNestedObject();
+      client["deviceId"] = clients[i].deviceId;
+      client["pitch"] = clients[i].pitch;
+      client["roll"] = clients[i].roll;
+      client["yaw"] = clients[i].yaw;
+      client["relPitch"] = clients[i].relPitch;
+      client["relRoll"] = clients[i].relRoll;
+      client["relYaw"] = clients[i].relYaw;
+      client["accPitch"] = clients[i].accPitch;
+      client["accRoll"] = clients[i].accRoll;
+      client["accYaw"] = clients[i].accYaw;
+      client["zeroSet"] = clients[i].zeroSet;
+      // ДОБАВЛЕНО: нулевые точки
+      client["zeroPitch"] = clients[i].zeroPitch;
+      client["zeroRoll"] = clients[i].zeroRoll;
+      client["zeroYaw"] = clients[i].zeroYaw;
+      // ДОБАВЛЕНО: новые поля
+      client["temperature"] = clients[i].temperature;
+      client["batteryLevel"] = clients[i].batteryLevel;
+      client["signalStrength"] = clients[i].signalStrength;
+      client["isCalibrating"] = clients[i].isCalibrating;
+      client["deviceType"] = clients[i].deviceType;
+      client["firmwareVersion"] = clients[i].firmwareVersion;
+      client["lastUpdate"] = clients[i].lastUpdate;
+    }
+  }
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+// API endpoint для получения статуса сервера
+void handleApiStatus() {
+  addCORSHeaders();
+  
+  DynamicJsonDocument doc(512);
+  doc["status"] = "running";
+  doc["uptime"] = millis();
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["connectedClients"] = 0;
+  
+  int connectedCount = 0;
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].connected) connectedCount++;
+  }
+  doc["connectedClients"] = connectedCount;
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n🚀 Starting VR Data Server...");
+  Serial.println();
+  Serial.println("🚀 Starting VR Data Server...");
   
   // Настройка WiFi в режиме точки доступа
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password);
   
-  Serial.println("📡 WiFi Access Point Started");
-  Serial.print("SSID: ");
+  Serial.print("📡 Access Point Started: ");
   Serial.println(ap_ssid);
-  Serial.print("IP Address: ");
+  Serial.print("📱 IP Address: ");
   Serial.println(WiFi.softAPIP());
   
-  // Настройка маршрутов сервера
+  // Настройка маршрутов веб-сервера
   server.on("/", handleRoot);
-  server.on("/data", HTTP_GET, []() {
-    addCORSHeaders();
-    
-    // Создаем JSON с данными всех клиентов
-    String json = "[";
-    bool first = true;
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-      if (clients[i].connected) {
-        if (!first) json += ",";
-        first = false;
-        
-        json += "{";
-        json += "\"deviceId\":\"" + clients[i].deviceId + "\",";
-        json += "\"pitch\":" + String(clients[i].pitch, 2) + ",";
-        json += "\"roll\":" + String(clients[i].roll, 2) + ",";
-        json += "\"yaw\":" + String(clients[i].yaw, 2) + ",";
-        json += "\"relPitch\":" + String(clients[i].relPitch, 2) + ",";
-        json += "\"relRoll\":" + String(clients[i].relRoll, 2) + ",";
-        json += "\"relYaw\":" + String(clients[i].relYaw, 2) + ",";
-        json += "\"accPitch\":" + String(clients[i].accPitch, 2) + ",";
-        json += "\"accRoll\":" + String(clients[i].accRoll, 2) + ",";
-        json += "\"accYaw\":" + String(clients[i].accYaw, 2) + ",";
-        json += "\"zeroSet\":" + String(clients[i].zeroSet ? "true" : "false") + ",";
-        json += "\"zeroPitch\":" + String(clients[i].zeroPitch, 2) + ",";
-        json += "\"zeroRoll\":" + String(clients[i].zeroRoll, 2) + ",";
-        json += "\"zeroYaw\":" + String(clients[i].zeroYaw, 2);
-        json += "}";
-      }
-    }
-    json += "]";
-    
-    server.send(200, "application/json", json);
-  });
-  
-  // ДОБАВЛЕНО: новый маршрут для получения списка устройств
-  server.on("/devices", HTTP_GET, []() {
-    addCORSHeaders();
-    
-    String json = "[";
-    bool first = true;
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-      if (clients[i].connected) {
-        if (!first) json += ",";
-        first = false;
-        
-        json += "{";
-        json += "\"deviceId\":\"" + clients[i].deviceId + "\",";
-        json += "\"lastUpdate\":" + String(clients[i].lastUpdate) + ",";
-        json += "\"connected\":true";
-        json += "}";
-      }
-    }
-    json += "]";
-    
-    server.send(200, "application/json", json);
-  });
-  
-  // ДОБАВЛЕНО: новый маршрут для получения статуса сервера
-  server.on("/status", HTTP_GET, []() {
-    addCORSHeaders();
-    
-    int connectedCount = 0;
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-      if (clients[i].connected) connectedCount++;
-    }
-    
-    String json = "{";
-    json += "\"uptime\":" + String(millis()) + ",";
-    json += "\"connectedDevices\":" + String(connectedCount) + ",";
-    json += "\"maxDevices\":" + String(MAX_CLIENTS) + ",";
-    json += "\"freeMemory\":" + String(ESP.getFreeHeap()) + ",";
-    json += "\"wifiClients\":" + String(WiFi.softAPgetStationNum());
-    json += "}";
-    
-    server.send(200, "application/json", json);
-  });
-  
-  // Обработчик OPTIONS запросов
+  server.on("/api/data", handleApiData);
+  server.on("/api/status", handleApiStatus);
   server.onNotFound([]() {
-    if (server.method() == HTTP_OPTIONS) {
-      handleOptions();
-    } else {
-      server.send(404, "text/plain", "Not Found");
-    }
+    server.send(404, "text/plain", "404: Not Found");
   });
   
-  // Запуск сервера
+  // Обработка OPTIONS запросов для CORS
+  server.on("/api/data", HTTP_OPTIONS, handleOptions);
+  server.on("/api/status", HTTP_OPTIONS, handleOptions);
+  
+  // Запуск веб-сервера
   server.begin();
-  Serial.println("✅ HTTP Server started on port 80");
+  Serial.println("🌐 HTTP server started");
   
   // Запуск WebSocket сервера
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
-  Serial.println("✅ WebSocket Server started on port 81");
+  Serial.println("🔌 WebSocket server started on port 81");
   
-  Serial.println("🎯 Server is ready! Connect to WiFi: " + String(ap_ssid));
-  Serial.println("📊 Web Interface: http://" + WiFi.softAPIP().toString());
+  Serial.println("✅ VR Data Server is ready!");
+  Serial.println("📊 Available endpoints:");
+  Serial.println("   - http://" + WiFi.softAPIP().toString() + "/ (Web Interface)");
+  Serial.println("   - http://" + WiFi.softAPIP().toString() + "/api/data (JSON API)");
+  Serial.println("   - http://" + WiFi.softAPIP().toString() + "/api/status (Status API)");
+  Serial.println("   - ws://" + WiFi.softAPIP().toString() + ":81 (WebSocket)");
 }
 
 void loop() {
@@ -709,7 +802,7 @@ void loop() {
     lastCleanup = millis();
   }
   
-  // Рассылка данных каждые 100 мс
+  // Рассылка данных всем WebSocket клиентам каждые 100 мс
   static unsigned long lastBroadcast = 0;
   if (millis() - lastBroadcast > 100) {
     broadcastData();

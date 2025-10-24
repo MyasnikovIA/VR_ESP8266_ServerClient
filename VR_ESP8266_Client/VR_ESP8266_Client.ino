@@ -61,7 +61,7 @@ void resetAllAngles() {
   
   Serial.println("All angles reset to zero");
   if (wsConnected) {
-    tempMessage = "ANGLES_RESET:" + deviceId; // ИСПРАВЛЕНИЕ: создаем переменную
+    tempMessage = "ANGLES_RESET:" + deviceId;
     webSocket.sendTXT(tempMessage);
   }
 }
@@ -82,7 +82,7 @@ void setCurrentPositionAsZero() {
   if (wsConnected) {
     tempMessage = "ZERO_SET_AT_CURRENT:PITCH:" + String(zeroPitchOffset, 2) + 
                      ",ROLL:" + String(zeroRollOffset, 2) + 
-                     ",YAW:" + String(zeroYawOffset, 2); // ИСПРАВЛЕНИЕ: используем tempMessage
+                     ",YAW:" + String(zeroYawOffset, 2);
     webSocket.sendTXT(tempMessage);
   }
 }
@@ -96,7 +96,7 @@ void resetZeroPoint() {
   
   Serial.println("Zero point reset");
   if (wsConnected) {
-    tempMessage = "ZERO_RESET"; // ИСПРАВЛЕНИЕ: используем tempMessage
+    tempMessage = "ZERO_RESET";
     webSocket.sendTXT(tempMessage);
   }
 }
@@ -197,7 +197,7 @@ void sendSensorData() {
                 ",ZERO_SET:" + String(zeroSet ? "true" : "false") +
                 ",ZERO_PITCH:" + String(zeroPitchOffset, 2) +
                 ",ZERO_ROLL:" + String(zeroRollOffset, 2) +
-                ",ZERO_YAW:" + String(zeroYawOffset, 2); // ИСПРАВЛЕНИЕ: используем tempMessage
+                ",ZERO_YAW:" + String(zeroYawOffset, 2);
   
   webSocket.sendTXT(tempMessage);
   lastSentPitch = pitch;
@@ -226,7 +226,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         Serial.println("WebSocket connected to server");
         wsConnected = true;
         // Отправляем идентификацию при подключении
-        tempMessage = "CLIENT_ID:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+        tempMessage = "CLIENT_ID:" + deviceId;
         webSocket.sendTXT(tempMessage);
         sendSensorData(); // Отправляем данные сразу после подключения
       }
@@ -235,7 +235,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     case WStype_TEXT:
       {
         String message = String((char*)payload);
-        Serial.printf("Received from server: %s\n", message);
+        // УБРАНО: Serial.printf("Received from server: %s\n", message);
         
         if (message == "GET_DATA") {
           sendSensorData();
@@ -243,23 +243,23 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         else if (message == "RECALIBRATE") {
           calibrated = false;
           calibrateSensor();
-          tempMessage = "RECALIBRATION_COMPLETE:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "RECALIBRATION_COMPLETE:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
         else if (message == "RESET_ANGLES") {
-          resetAllAngles(); // ИЗМЕНЕНО: используем новую функцию
-          tempMessage = "ANGLES_RESET:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          resetAllAngles();
+          tempMessage = "ANGLES_RESET:" + deviceId;
           webSocket.sendTXT(tempMessage);
           sendSensorData();
         }
         else if (message == "SET_ZERO") {
           setCurrentPositionAsZero();
-          tempMessage = "ZERO_POINT_SET:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "ZERO_POINT_SET:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
         else if (message == "RESET_ZERO") {
           resetZeroPoint();
-          tempMessage = "ZERO_POINT_RESET:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "ZERO_POINT_RESET:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
         // Новая команда для принудительной калибровки
@@ -267,21 +267,21 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
           Serial.println("Force calibration requested");
           calibrated = false;
           calibrateSensor();
-          tempMessage = "FORCE_CALIBRATION_COMPLETE:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "FORCE_CALIBRATION_COMPLETE:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
         // НОВАЯ КОМАНДА: Установить текущее положение как ноль
         else if (message == "SET_CURRENT_AS_ZERO") {
           Serial.println("Set current position as zero requested");
           setCurrentPositionAsZero();
-          tempMessage = "CURRENT_POSITION_SET_AS_ZERO:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "CURRENT_POSITION_SET_AS_ZERO:" + deviceId;
           webSocket.sendTXT(tempMessage);
         }
         // НОВАЯ КОМАНДА: Обнулить все углы
         else if (message == "RESET_ALL_ANGLES") {
           Serial.println("Reset all angles requested");
           resetAllAngles();
-          tempMessage = "ALL_ANGLES_RESET:" + deviceId; // ИСПРАВЛЕНИЕ: используем tempMessage
+          tempMessage = "ALL_ANGLES_RESET:" + deviceId;
           webSocket.sendTXT(tempMessage);
           sendSensorData();
         }
@@ -384,7 +384,7 @@ void setup() {
   Serial.println("  - SET_ZERO: Set current position as zero point");
   Serial.println("  - SET_CURRENT_AS_ZERO: Set current position as zero point (alternative)");
   Serial.println("  - RESET_ZERO: Reset zero point");
-  Serial.println("  - RESET_ALL_ANGLES: Reset all angles to zero"); // ДОБАВЛЕНО
+  Serial.println("  - RESET_ALL_ANGLES: Reset all angles to zero");
   Serial.println("  - FORCE_CALIBRATE: Force sensor recalibration");
   Serial.println("  - RECALIBRATE: Recalibrate sensor");
   Serial.println("  - RESET_ANGLES: Reset all angles");
@@ -449,7 +449,7 @@ void loop() {
   } else {
     // Если не подключены, выводим статус каждые 10 секунд
     static unsigned long lastStatus = 0;
-    if (millis() - lastStatus > 10000) {
+    if (millis() - lastStatus > 1000) {
       Serial.println("Waiting for connection to server...");
       Serial.print("WiFi: ");
       Serial.println(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
