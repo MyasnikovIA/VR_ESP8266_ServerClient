@@ -196,10 +196,14 @@ const String htmlPage = R"rawliteral(
         
         function fixIP(mac, ip) {
             if (confirm(`Fix IP ${ip} for MAC ${formatMac(mac)}?`)) {
+                // Используем FormData вместо JSON для совместимости
+                const formData = new FormData();
+                formData.append('mac', mac);
+                formData.append('ip', ip);
+                
                 fetch('/api/fixip', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({mac: mac, ip: ip})
+                    body: formData
                 })
                 .then(r => r.json())
                 .then(data => {
@@ -470,20 +474,27 @@ void handleApiDevices() {
 // API для фиксации IP адреса
 void handleApiFixIP() {
   if (server.method() == HTTP_POST) {
+    // Получаем параметры из тела запроса
     String mac = server.arg("mac");
     String ip = server.arg("ip");
+    
+    Serial.printf("Fix IP request - MAC: %s, IP: %s\n", mac.c_str(), ip.c_str());
     
     if (mac.length() > 0 && ip.length() > 0) {
       if (fixIPAddress(mac, ip)) {
         server.send(200, "application/json", "{\"status\":\"success\"}");
+        Serial.println("IP fixed successfully");
       } else {
-        server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot fix IP\"}");
+        server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot fix IP - memory full\"}");
+        Serial.println("Error: Cannot fix IP - memory full");
       }
     } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters\"}");
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters - MAC or IP empty\"}");
+      Serial.println("Error: Missing parameters");
     }
   } else {
     server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+    Serial.println("Error: Method not allowed");
   }
 }
 
