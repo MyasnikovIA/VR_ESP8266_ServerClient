@@ -2,6 +2,7 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <EEPROM.h>
+#include <ArduinoJson.h>
 
 // Настройки WiFi
 const char* ssid = "ESP8266_Network_Monitor";
@@ -18,6 +19,13 @@ struct DeviceInfo {
   unsigned long firstSeen;
   unsigned long lastSeen;
   int rssi;
+  bool ipFixed;
+};
+
+// Структура для фиксированных IP адресов
+struct FixedIP {
+  String mac;
+  String ip;
 };
 
 // Массив для хранения подключенных устройств
@@ -25,152 +33,55 @@ const int MAX_DEVICES = 50;
 DeviceInfo devices[MAX_DEVICES];
 int deviceCount = 0;
 
+// Массив для фиксированных IP адресов
+const int MAX_FIXED_IPS = 20;
+FixedIP fixedIPs[MAX_FIXED_IPS];
+int fixedIPCount = 0;
+
 // Время последнего сканирования
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
 
-// HTML страница - упрощенная версия
+// HTML страница - сильно упрощенная
 const String htmlPage = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
 <head>
-    <title>ESP8266 Network Monitor</title>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Network Monitor</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #f0f0f0;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: #2c3e50;
-            color: white;
-            border-radius: 8px;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
-        }
-        .stat-card {
-            background: #ecf0f1;
-            padding: 15px;
-            border-radius: 8px;
-            text-align: center;
-            border-left: 4px solid #3498db;
-        }
-        .stat-number {
-            font-size: 24px;
-            font-weight: bold;
-            color: #2c3e50;
-        }
-        .stat-label {
-            color: #7f8c8d;
-            font-size: 14px;
-        }
-        .devices-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        .device-card {
-            background: white;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 15px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        .device-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 10px;
-        }
-        .device-name {
-            font-weight: bold;
-            color: #2c3e50;
-        }
-        .device-status {
-            background: #27ae60;
-            color: white;
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 12px;
-        }
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 5px;
-            font-size: 14px;
-        }
-        .info-label {
-            color: #7f8c8d;
-        }
-        .info-value {
-            color: #2c3e50;
-            font-family: monospace;
-        }
-        .controls {
-            text-align: center;
-            margin: 20px 0;
-        }
-        .btn {
-            padding: 10px 20px;
-            margin: 5px;
-            border: none;
-            border-radius: 5px;
-            background: #3498db;
-            color: white;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        .btn:hover {
-            background: #2980b9;
-        }
-        .btn-success {
-            background: #27ae60;
-        }
-        .btn-warning {
-            background: #e67e22;
-        }
-        .refresh-loading {
-            background: #f39c12 !important;
-        }
-        .last-update {
-            text-align: center;
-            color: #7f8c8d;
-            font-size: 14px;
-            margin-top: 20px;
-        }
-        .no-devices {
-            text-align: center;
-            color: #7f8c8d;
-            padding: 40px;
-            grid-column: 1 / -1;
-        }
+        body { font-family: Arial; margin: 20px; background: #f0f0f0; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
+        .header { text-align: center; margin-bottom: 20px; padding: 20px; background: #2c3e50; color: white; border-radius: 8px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .stat-card { background: #ecf0f1; padding: 10px; border-radius: 5px; text-align: center; }
+        .stat-number { font-size: 20px; font-weight: bold; color: #2c3e50; }
+        .stat-label { color: #7f8c8d; font-size: 12px; }
+        .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .device-card { background: white; border: 1px solid #ddd; border-radius: 5px; padding: 10px; }
+        .device-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
+        .device-name { font-weight: bold; color: #2c3e50; }
+        .device-status { background: #27ae60; color: white; padding: 2px 6px; border-radius: 8px; font-size: 10px; }
+        .status-fixed { background: #e67e22; }
+        .info-row { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 12px; }
+        .info-label { color: #7f8c8d; }
+        .info-value { color: #2c3e50; font-family: monospace; }
+        .controls { text-align: center; margin: 15px 0; }
+        .btn { padding: 6px 12px; margin: 3px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 11px; }
+        .btn:hover { background: #2980b9; }
+        .btn-fixed { background: #9b59b6; }
+        .refresh-loading { background: #f39c12 !important; }
+        .last-update { text-align: center; color: #7f8c8d; font-size: 12px; margin-top: 15px; }
+        .no-devices { text-align: center; color: #7f8c8d; padding: 20px; }
+        .fixed-badge { background: #9b59b6; color: white; padding: 1px 4px; border-radius: 6px; font-size: 9px; margin-left: 3px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🖥️ Network Monitor</h1>
-            <p>Real-time device monitoring on ESP8266</p>
+            <p>Real-time device monitoring</p>
         </div>
         
         <div class="stats">
@@ -180,27 +91,22 @@ const String htmlPage = R"rawliteral(
             </div>
             <div class="stat-card">
                 <div class="stat-number" id="onlineDevices">0</div>
-                <div class="stat-label">Currently Online</div>
+                <div class="stat-label">Online Now</div>
             </div>
             <div class="stat-card">
                 <div class="stat-number" id="espIp">-</div>
-                <div class="stat-label">ESP IP Address</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number" id="lastScan">-</div>
-                <div class="stat-label">Last Scan</div>
+                <div class="stat-label">ESP IP</div>
             </div>
         </div>
         
-        <h2>📱 Connected Devices</h2>
+        <h3>📱 Connected Devices</h3>
         <div id="devicesContainer" class="devices-grid">
-            <div class="no-devices">No devices found on the network</div>
+            <div class="no-devices">No devices found</div>
         </div>
         
         <div class="controls">
-            <button class="btn" onclick="refreshData()" id="refreshBtn">🔄 Refresh Now</button>
-            <button class="btn btn-success" onclick="startAutoRefresh()" id="autoRefreshBtn">🔄 Auto Refresh (10s)</button>
-            <button class="btn btn-warning" onclick="clearData()">🗑️ Clear History</button>
+            <button class="btn" onclick="refreshData()" id="refreshBtn">🔄 Refresh</button>
+            <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">🔄 Auto (10s)</button>
         </div>
         
         <div class="last-update">
@@ -212,24 +118,21 @@ const String htmlPage = R"rawliteral(
         let autoRefreshInterval = null;
         
         function refreshData() {
-            const refreshBtn = document.getElementById('refreshBtn');
-            const originalText = refreshBtn.innerHTML;
-            refreshBtn.innerHTML = '⏳ Scanning...';
-            refreshBtn.classList.add('refresh-loading');
-            refreshBtn.disabled = true;
+            const btn = document.getElementById('refreshBtn');
+            btn.innerHTML = '⏳ Scanning...';
+            btn.disabled = true;
             
             fetch('/api/devices')
-                .then(response => response.json())
+                .then(r => r.json())
                 .then(data => {
                     updateDisplay(data);
                 })
-                .catch(error => {
-                    console.error('Error:', error);
+                .catch(e => {
+                    console.error('Error:', e);
                 })
                 .finally(() => {
-                    refreshBtn.innerHTML = originalText;
-                    refreshBtn.classList.remove('refresh-loading');
-                    refreshBtn.disabled = false;
+                    btn.innerHTML = '🔄 Refresh';
+                    btn.disabled = false;
                 });
         }
         
@@ -237,21 +140,23 @@ const String htmlPage = R"rawliteral(
             document.getElementById('totalDevices').textContent = data.totalDevices;
             document.getElementById('onlineDevices').textContent = data.onlineDevices;
             document.getElementById('espIp').textContent = data.espIp;
-            document.getElementById('lastScan').textContent = data.lastScanTime + 's ago';
             document.getElementById('updateTime').textContent = new Date().toLocaleTimeString();
             
             const container = document.getElementById('devicesContainer');
             
-            if (data.devices.length === 0) {
-                container.innerHTML = '<div class="no-devices">No devices found on the network</div>';
+            if (!data.devices || data.devices.length === 0) {
+                container.innerHTML = '<div class="no-devices">No devices found on network</div>';
                 return;
             }
             
             container.innerHTML = data.devices.map(device => `
                 <div class="device-card">
                     <div class="device-header">
-                        <div class="device-name">${getDeviceIcon(device)} ${device.hostname || 'Unknown Device'}</div>
-                        <div class="device-status">Online</div>
+                        <div class="device-name">
+                            ${getDeviceIcon(device)} ${device.hostname || 'Unknown'}
+                            ${device.ipFixed ? '<span class="fixed-badge">Fixed</span>' : ''}
+                        </div>
+                        <div class="device-status ${device.ipFixed ? 'status-fixed' : ''}">Online</div>
                     </div>
                     <div class="info-row">
                         <span class="info-label">IP:</span>
@@ -262,49 +167,54 @@ const String htmlPage = R"rawliteral(
                         <span class="info-value">${formatMac(device.mac)}</span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">First Seen:</span>
-                        <span class="info-value">${formatTime(device.firstSeen)}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Last Seen:</span>
-                        <span class="info-value">${formatTime(device.lastSeen)}</span>
-                    </div>
-                    <div class="info-row">
                         <span class="info-label">Signal:</span>
                         <span class="info-value">${device.rssi} dBm</span>
+                    </div>
+                    <div style="text-align: center; margin-top: 8px;">
+                        <button class="btn btn-fixed" onclick="fixIP('${device.mac}', '${device.ip}')">
+                            📌 Fix IP
+                        </button>
                     </div>
                 </div>
             `).join('');
         }
         
         function getDeviceIcon(device) {
-            const mac = device.mac.toLowerCase();
+            const mac = (device.mac || '').toLowerCase();
             const hostname = (device.hostname || '').toLowerCase();
             
-            if (mac.includes('apple') || hostname.includes('iphone') || hostname.includes('ipad')) {
-                return '📱';
-            } else if (hostname.includes('android')) {
-                return '📱';
-            } else if (hostname.includes('pc') || hostname.includes('desktop') || hostname.includes('laptop')) {
-                return '💻';
-            } else if (mac.startsWith('b8:27:eb') || hostname.includes('raspberry')) {
-                return '🍓';
-            }
+            if (mac.includes('apple') || hostname.includes('iphone') || hostname.includes('ipad')) return '📱';
+            if (hostname.includes('android')) return '📱';
+            if (hostname.includes('pc') || hostname.includes('desktop') || hostname.includes('laptop')) return '💻';
+            if (mac.startsWith('b8:27:eb') || hostname.includes('raspberry')) return '🍓';
             return '🔌';
         }
         
         function formatMac(mac) {
-            return mac.toUpperCase().match(/.{1,2}/g).join(':');
+            return mac ? mac.toUpperCase().match(/.{1,2}/g).join(':') : '';
         }
         
-        function formatTime(timestamp) {
-            const now = Math.floor(Date.now() / 1000);
-            const diff = now - timestamp;
-            
-            if (diff < 60) return 'Just now';
-            if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
-            if (diff < 86400) return Math.floor(diff / 3600) + ' hours ago';
-            return Math.floor(diff / 86400) + ' days ago';
+        function fixIP(mac, ip) {
+            if (confirm(`Fix IP ${ip} for MAC ${formatMac(mac)}?`)) {
+                fetch('/api/fixip', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mac: mac, ip: ip})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert('IP fixed!');
+                        refreshData();
+                    } else {
+                        alert('Error: ' + (data.message || 'Unknown error'));
+                    }
+                })
+                .catch(e => {
+                    console.error('Error:', e);
+                    alert('Error fixing IP');
+                });
+            }
         }
         
         function startAutoRefresh() {
@@ -313,28 +223,16 @@ const String htmlPage = R"rawliteral(
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
                 autoRefreshInterval = null;
-                btn.innerHTML = '🔄 Auto Refresh (10s)';
-                btn.className = 'btn btn-success';
+                btn.innerHTML = '🔄 Auto (10s)';
             } else {
                 autoRefreshInterval = setInterval(refreshData, 10000);
-                btn.innerHTML = '⏹️ Stop Auto Refresh';
-                btn.className = 'btn';
+                btn.innerHTML = '⏹️ Stop';
                 refreshData();
             }
         }
         
-        function clearData() {
-            if (confirm('Are you sure you want to clear all device history?')) {
-                fetch('/api/clear', { method: 'POST' })
-                    .then(() => refreshData())
-                    .catch(error => console.error('Error:', error));
-            }
-        }
-        
-        // Загружаем данные при старте
-        document.addEventListener('DOMContentLoaded', function() {
-            refreshData();
-        });
+        // Load data on start
+        document.addEventListener('DOMContentLoaded', refreshData);
     </script>
 </body>
 </html>
@@ -350,37 +248,94 @@ int findDeviceByMAC(const String& mac) {
   return -1;
 }
 
+// Функция для поиска фиксированного IP по MAC
+int findFixedIPByMAC(const String& mac) {
+  for (int i = 0; i < fixedIPCount; i++) {
+    if (fixedIPs[i].mac == mac) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // Функция для добавления нового устройства
 void addDevice(const String& ip, const String& mac, const String& hostname, int rssi) {
   int index = findDeviceByMAC(mac);
   unsigned long currentTime = millis() / 1000;
   
+  // Проверяем есть ли фиксированный IP для этого MAC
+  int fixedIndex = findFixedIPByMAC(mac);
+  String actualIP = ip;
+  bool isFixed = false;
+  
+  if (fixedIndex != -1) {
+    actualIP = fixedIPs[fixedIndex].ip;
+    isFixed = true;
+  }
+  
   if (index == -1) {
     if (deviceCount < MAX_DEVICES) {
-      devices[deviceCount].ip = ip;
+      devices[deviceCount].ip = actualIP;
       devices[deviceCount].mac = mac;
       devices[deviceCount].hostname = hostname;
       devices[deviceCount].firstSeen = currentTime;
       devices[deviceCount].lastSeen = currentTime;
       devices[deviceCount].rssi = rssi;
+      devices[deviceCount].ipFixed = isFixed;
       deviceCount++;
       
-      Serial.printf("New device: %s (%s) - %s - RSSI: %d\n", 
-                   hostname.c_str(), ip.c_str(), mac.c_str(), rssi);
+      Serial.printf("New device: %s (%s) - %s - RSSI: %d - Fixed: %s\n", 
+                   hostname.c_str(), actualIP.c_str(), mac.c_str(), rssi, isFixed ? "Yes" : "No");
     }
   } else {
     devices[index].lastSeen = currentTime;
     devices[index].rssi = rssi;
+    devices[index].ip = actualIP;
+    devices[index].ipFixed = isFixed;
     if (hostname.length() > 0 && devices[index].hostname != hostname) {
       devices[index].hostname = hostname;
     }
   }
 }
 
+// Функция для фиксации IP адреса
+bool fixIPAddress(const String& mac, const String& ip) {
+  int index = findFixedIPByMAC(mac);
+  
+  if (index == -1) {
+    if (fixedIPCount < MAX_FIXED_IPS) {
+      fixedIPs[fixedIPCount].mac = mac;
+      fixedIPs[fixedIPCount].ip = ip;
+      fixedIPCount++;
+      
+      // Обновляем устройство если оно есть в списке
+      int deviceIndex = findDeviceByMAC(mac);
+      if (deviceIndex != -1) {
+        devices[deviceIndex].ip = ip;
+        devices[deviceIndex].ipFixed = true;
+      }
+      
+      saveFixedIPsToEEPROM();
+      return true;
+    }
+  } else {
+    fixedIPs[index].ip = ip;
+    
+    // Обновляем устройство если оно есть в списке
+    int deviceIndex = findDeviceByMAC(mac);
+    if (deviceIndex != -1) {
+      devices[deviceIndex].ip = ip;
+      devices[deviceIndex].ipFixed = true;
+    }
+    
+    saveFixedIPsToEEPROM();
+    return true;
+  }
+  return false;
+}
+
 // Функция для сканирования сети
 void scanNetwork() {
-  Serial.println("Scanning network...");
-  
   struct station_info *station = wifi_softap_get_station_info();
   int onlineCount = 0;
   
@@ -389,7 +344,9 @@ void scanNetwork() {
     String mac = "";
     for(int i = 0; i < 6; i++) {
       if (i > 0) mac += ":";
-      mac += String(station->bssid[i], HEX);
+      String hex = String(station->bssid[i], HEX);
+      if (hex.length() == 1) hex = "0" + hex;
+      mac += hex;
     }
     
     String hostname = "";
@@ -407,6 +364,69 @@ void scanNetwork() {
   lastScanTime = millis();
 }
 
+// Функция для сохранения фиксированных IP в EEPROM
+void saveFixedIPsToEEPROM() {
+  EEPROM.begin(512);
+  
+  // Используем простой формат для экономии памяти
+  int addr = 0;
+  EEPROM.write(addr++, fixedIPCount);
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    // Сохраняем MAC
+    String mac = fixedIPs[i].mac;
+    EEPROM.write(addr++, mac.length());
+    for (int j = 0; j < mac.length(); j++) {
+      EEPROM.write(addr++, mac[j]);
+    }
+    
+    // Сохраняем IP
+    String ip = fixedIPs[i].ip;
+    EEPROM.write(addr++, ip.length());
+    for (int j = 0; j < ip.length(); j++) {
+      EEPROM.write(addr++, ip[j]);
+    }
+  }
+  
+  EEPROM.commit();
+  EEPROM.end();
+  
+  Serial.println("Fixed IPs saved to EEPROM");
+}
+
+// Функция для загрузки фиксированных IP из EEPROM
+void loadFixedIPsFromEEPROM() {
+  EEPROM.begin(512);
+  
+  int addr = 0;
+  fixedIPCount = EEPROM.read(addr++);
+  
+  if (fixedIPCount > MAX_FIXED_IPS) fixedIPCount = 0;
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    // Загружаем MAC
+    int macLen = EEPROM.read(addr++);
+    String mac = "";
+    for (int j = 0; j < macLen; j++) {
+      mac += char(EEPROM.read(addr++));
+    }
+    
+    // Загружаем IP
+    int ipLen = EEPROM.read(addr++);
+    String ip = "";
+    for (int j = 0; j < ipLen; j++) {
+      ip += char(EEPROM.read(addr++));
+    }
+    
+    fixedIPs[i].mac = mac;
+    fixedIPs[i].ip = ip;
+  }
+  
+  EEPROM.end();
+  
+  Serial.printf("Fixed IPs loaded from EEPROM: %d\n", fixedIPCount);
+}
+
 // Функция для очистки EEPROM
 void clearEEPROM() {
   EEPROM.begin(512);
@@ -420,7 +440,7 @@ void clearEEPROM() {
 
 // Обработчик главной страницы
 void handleRoot() {
-  server.send(200, "text/html", htmlPage);
+  server.send(200, "text/html; charset=UTF-8", htmlPage);
 }
 
 // API для получения списка устройств
@@ -429,7 +449,6 @@ void handleApiDevices() {
   json += "\"totalDevices\":" + String(deviceCount) + ",";
   json += "\"onlineDevices\":" + String(deviceCount) + ",";
   json += "\"espIp\":\"" + WiFi.softAPIP().toString() + "\",";
-  json += "\"lastScanTime\":" + String((millis() - lastScanTime) / 1000) + ",";
   json += "\"devices\":[";
   
   for (int i = 0; i < deviceCount; i++) {
@@ -438,21 +457,34 @@ void handleApiDevices() {
     json += "\"ip\":\"" + devices[i].ip + "\",";
     json += "\"mac\":\"" + devices[i].mac + "\",";
     json += "\"hostname\":\"" + devices[i].hostname + "\",";
-    json += "\"firstSeen\":" + String(devices[i].firstSeen) + ",";
-    json += "\"lastSeen\":" + String(devices[i].lastSeen) + ",";
-    json += "\"rssi\":" + String(devices[i].rssi);
+    json += "\"rssi\":" + String(devices[i].rssi) + ",";
+    json += "\"ipFixed\":" + String(devices[i].ipFixed ? "true" : "false");
     json += "}";
   }
   
   json += "]}";
   
-  server.send(200, "application/json", json);
+  server.send(200, "application/json; charset=UTF-8", json);
 }
 
-// API для очистки данных
-void handleApiClear() {
-  deviceCount = 0;
-  server.send(200, "application/json", "{\"status\":\"success\"}");
+// API для фиксации IP адреса
+void handleApiFixIP() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    String ip = server.arg("ip");
+    
+    if (mac.length() > 0 && ip.length() > 0) {
+      if (fixIPAddress(mac, ip)) {
+        server.send(200, "application/json", "{\"status\":\"success\"}");
+      } else {
+        server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot fix IP\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
 }
 
 // Настройка WiFi в режиме точки доступа
@@ -469,7 +501,7 @@ void setupWiFi() {
   
   Serial.println("Access Point Started");
   Serial.print("SSID: "); Serial.println(ssid);
-  Serial.print("IP address: "); Serial.println(WiFi.softAPIP());
+  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
 }
 
 void setup() {
@@ -478,23 +510,19 @@ void setup() {
   
   Serial.println("\nStarting ESP8266 Network Monitor...");
   
-  // Очистка EEPROM при первом запуске
-  clearEEPROM();
+  // Очистка EEPROM при первом запуске (раскомментировать для очистки)
+  // clearEEPROM();
+  
+  // Загрузка фиксированных IP из EEPROM
+  loadFixedIPsFromEEPROM();
   
   // Настройка WiFi
   setupWiFi();
   
-  // Настройка mDNS
-  if (!MDNS.begin("esp8266")) {
-    Serial.println("Error setting up MDNS responder!");
-  } else {
-    Serial.println("mDNS responder started");
-  }
-  
   // Настройка маршрутов сервера
   server.on("/", handleRoot);
   server.on("/api/devices", handleApiDevices);
-  server.on("/api/clear", HTTP_POST, handleApiClear);
+  server.on("/api/fixip", HTTP_POST, handleApiFixIP);
   
   // Запуск сервера
   server.begin();
@@ -508,7 +536,6 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  MDNS.update();
   
   if (millis() - lastScanTime >= SCAN_INTERVAL) {
     scanNetwork();
