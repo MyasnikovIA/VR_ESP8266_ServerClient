@@ -1,5 +1,6 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <WebSocketsServer.h>
 #include <EEPROM.h>
 #include <ArduinoJson.h>
 
@@ -10,22 +11,20 @@ const char* ap_password = "12345678";
 // Создание веб-сервера на порту 80
 ESP8266WebServer server(80);
 
+// WebSocket сервер на порту 81
+WebSocketsServer webSocket = WebSocketsServer(81);
+
 // Структура для хранения информации об устройстве
 struct DeviceInfo {
   String ip;
   String mac;
   String hostname;
-  unsigned long firstSeen;
-  unsigned long lastSeen;
   int rssi;
   bool ipFixed;
-};
-
-// Структура для фиксированных IP адресов и имен
-struct FixedDevice {
-  String mac;
-  String ip;
-  String customName;
+  bool hasMPU6050;
+  float pitch;
+  float roll;
+  float yaw;
 };
 
 // Структура для настроек сети
@@ -37,14 +36,9 @@ struct NetworkSettings {
 };
 
 // Массив для хранения подключенных устройств
-const int MAX_DEVICES = 50;
+const int MAX_DEVICES = 20;
 DeviceInfo devices[MAX_DEVICES];
 int deviceCount = 0;
-
-// Массив для фиксированных устройств
-const int MAX_FIXED_DEVICES = 20;
-FixedDevice fixedDevices[MAX_FIXED_DEVICES];
-int fixedDeviceCount = 0;
 
 // Настройки сети
 NetworkSettings networkSettings;
@@ -53,24 +47,9 @@ NetworkSettings networkSettings;
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
 
-// Прототипы функций
-void saveFixedDevicesToEEPROM();
-void loadFixedDevicesFromEEPROM();
-void saveNetworkSettingsToEEPROM();
-void loadNetworkSettingsFromEEPROM();
-void clearFixedDevices();
-int findDeviceByMAC(const String& mac);
-int findFixedDeviceByMAC(const String& mac);
-String getDisplayName(const String& mac, const String& originalHostname);
-bool hasCustomName(const String& mac);
-bool fixIPAddress(const String& mac, const String& ip);
-bool setDeviceName(const String& mac, const String& name);
-void setupWiFiAP();
-void scanNetwork();
-
 // Упрощенная HTML страница
-const String htmlPage = R"rawliteral(
-<!DOCTYPE HTML>
+const char htmlPage[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -89,20 +68,14 @@ const String htmlPage = R"rawliteral(
         .device-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
         .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; }
         .device-status { background: #27ae60; color: white; padding: 2px 5px; border-radius: 6px; font-size: 9px; }
-        .status-fixed { background: #e67e22; }
         .info-row { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 11px; }
         .info-label { color: #7f8c8d; }
         .info-value { color: #2c3e50; font-family: monospace; }
         .controls { text-align: center; margin: 10px 0; }
         .btn { padding: 5px 10px; margin: 2px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 10px; }
-        .btn:hover { background: #2980b9; }
-        .btn-fixed { background: #9b59b6; }
-        .btn-edit { background: #f39c12; }
         .btn-settings { background: #34495e; }
         .last-update { text-align: center; color: #7f8c8d; font-size: 11px; margin-top: 10px; }
         .no-devices { text-align: center; color: #7f8c8d; padding: 15px; }
-        .fixed-badge { background: #9b59b6; color: white; padding: 1px 3px; border-radius: 4px; font-size: 8px; margin-left: 2px; }
-        .name-badge { background: #f39c12; color: white; padding: 1px 3px; border-radius: 4px; font-size: 8px; margin-left: 2px; }
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
         .modal-content { background-color: white; margin: 15% auto; padding: 15px; border-radius: 6px; width: 300px; max-width: 90%; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
@@ -144,7 +117,7 @@ const String htmlPage = R"rawliteral(
         
         <div class="controls">
             <button class="btn" onclick="refreshData()" id="refreshBtn">🔄 Refresh</button>
-            <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">🔄 Auto (10s)</button>
+            <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">Auto (10s)</button>
             <button class="btn btn-settings" onclick="showSettings()">⚙️ Settings</button>
         </div>
         
@@ -153,31 +126,7 @@ const String htmlPage = R"rawliteral(
         </div>
     </div>
 
-    <div id="editModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div class="modal-title">✏️ Edit Device Name</div>
-                <span class="close" onclick="closeModal('editModal')">&times;</span>
-            </div>
-            <div class="form-group">
-                <label class="form-label">MAC Address:</label>
-                <input type="text" id="editMac" class="form-input" readonly>
-            </div>
-            <div class="form-group">
-                <label class="form-label">IP Address:</label>
-                <input type="text" id="editIp" class="form-input" readonly>
-            </div>
-            <div class="form-group">
-                <label class="form-label">Device Name:</label>
-                <input type="text" id="editName" class="form-input" maxlength="20" placeholder="Enter custom name">
-            </div>
-            <div class="modal-buttons">
-                <button class="btn" onclick="closeModal('editModal')">Cancel</button>
-                <button class="btn btn-edit" onclick="saveDeviceName()">💾 Save</button>
-            </div>
-        </div>
-    </div>
-
+    <!-- Modal for network settings -->
     <div id="settingsModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -185,7 +134,7 @@ const String htmlPage = R"rawliteral(
                 <span class="close" onclick="closeModal('settingsModal')">&times;</span>
             </div>
             <div class="warning">
-                ⚠️ Changing subnet will clear all fixed IP addresses!
+                ⚠️ Changing subnet will restart access point!
             </div>
             <div class="form-group">
                 <label class="form-label">WiFi SSID:</label>
@@ -208,7 +157,6 @@ const String htmlPage = R"rawliteral(
 
     <script>
         let autoRefreshInterval = null;
-        let currentEditMac = '';
         
         function refreshData() {
             const btn = document.getElementById('refreshBtn');
@@ -248,10 +196,8 @@ const String htmlPage = R"rawliteral(
                     <div class="device-header">
                         <div class="device-name">
                             ${getDeviceIcon(device)} ${device.displayName}
-                            ${device.ipFixed ? '<span class="fixed-badge">Fixed IP</span>' : ''}
-                            ${device.hasCustomName ? '<span class="name-badge">Custom</span>' : ''}
                         </div>
-                        <div class="device-status ${device.ipFixed ? 'status-fixed' : ''}">Online</div>
+                        <div class="device-status">Online</div>
                     </div>
                     <div class="info-row">
                         <span class="info-label">IP:</span>
@@ -265,60 +211,20 @@ const String htmlPage = R"rawliteral(
                         <span class="info-label">Signal:</span>
                         <span class="info-value">${device.rssi} dBm</span>
                     </div>
-                    <div style="text-align: center; margin-top: 6px; display: flex; justify-content: center; gap: 4px;">
-                        <button class="btn btn-fixed" onclick="fixIP('${device.mac}', '${device.ip}')">📌 Fix IP</button>
-                        <button class="btn btn-edit" onclick="editDeviceName('${device.mac}', '${device.ip}', '${device.displayName.replace(/'/g, "\\'")}')">✏️ Edit</button>
-                    </div>
                 </div>
             `).join('');
         }
         
         function getDeviceIcon(device) {
-            const mac = (device.mac || '').toLowerCase();
             const name = (device.displayName || '').toLowerCase();
-            if (mac.includes('apple') || name.includes('iphone') || name.includes('ipad')) return '📱';
+            if (name.includes('iphone') || name.includes('ipad')) return '📱';
             if (name.includes('android')) return '📱';
             if (name.includes('pc') || name.includes('desktop') || name.includes('laptop')) return '💻';
-            if (mac.startsWith('b8:27:eb') || name.includes('raspberry')) return '🍓';
             return '🔌';
         }
         
         function formatMac(mac) {
             return mac ? mac.toUpperCase().match(/.{1,2}/g).join(':') : '';
-        }
-        
-        function fixIP(mac, ip) {
-            if (confirm(`Fix IP ${ip} for MAC ${formatMac(mac)}?`)) {
-                const formData = new FormData();
-                formData.append('mac', mac);
-                formData.append('ip', ip);
-                
-                fetch('/api/fixip', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        alert('IP fixed!');
-                        refreshData();
-                    } else {
-                        alert('Error: ' + (data.message || 'Unknown error'));
-                    }
-                })
-                .catch(e => {
-                    console.error('Error:', e);
-                    alert('Error fixing IP');
-                });
-            }
-        }
-        
-        function editDeviceName(mac, ip, currentName) {
-            currentEditMac = mac;
-            document.getElementById('editMac').value = formatMac(mac);
-            document.getElementById('editIp').value = ip;
-            document.getElementById('editName').value = currentName;
-            document.getElementById('editModal').style.display = 'block';
         }
         
         function showSettings() {
@@ -327,41 +233,6 @@ const String htmlPage = R"rawliteral(
         
         function closeModal(modalId) {
             document.getElementById(modalId).style.display = 'none';
-            if (modalId === 'editModal') {
-                currentEditMac = '';
-            }
-        }
-        
-        function saveDeviceName() {
-            const newName = document.getElementById('editName').value.trim();
-            const mac = currentEditMac;
-            
-            if (!newName) {
-                alert('Please enter a device name');
-                return;
-            }
-            
-            const formData = new FormData();
-            formData.append('mac', mac);
-            formData.append('name', newName);
-            
-            fetch('/api/setname', {
-                method: 'POST',
-                body: formData
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    closeModal('editModal');
-                    refreshData();
-                } else {
-                    alert('Error: ' + (data.message || 'Unknown error'));
-                }
-            })
-            .catch(e => {
-                console.error('Error:', e);
-                alert('Error saving device name');
-            });
         }
         
         function saveSettings() {
@@ -384,7 +255,7 @@ const String htmlPage = R"rawliteral(
                 return;
             }
             
-            if (!confirm('Changing subnet will clear all fixed IP addresses! Continue?')) {
+            if (!confirm('Changing settings will restart access point! Continue?')) {
                 return;
             }
             
@@ -420,10 +291,10 @@ const String htmlPage = R"rawliteral(
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
                 autoRefreshInterval = null;
-                btn.innerHTML = '🔄 Auto (10s)';
+                btn.innerHTML = 'Auto (10s)';
             } else {
                 autoRefreshInterval = setInterval(refreshData, 10000);
-                btn.innerHTML = '⏹️ Stop';
+                btn.innerHTML = 'Stop';
                 refreshData();
             }
         }
@@ -437,7 +308,10 @@ const String htmlPage = R"rawliteral(
             }
         }
         
-        document.addEventListener('DOMContentLoaded', refreshData);
+        // Инициализация при загрузке страницы
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshData();
+        });
     </script>
 </body>
 </html>
@@ -453,140 +327,38 @@ int findDeviceByMAC(const String& mac) {
   return -1;
 }
 
-// Функция для поиска фиксированного устройства по MAC
-int findFixedDeviceByMAC(const String& mac) {
-  for (int i = 0; i < fixedDeviceCount; i++) {
-    if (fixedDevices[i].mac == mac) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 // Функция для получения отображаемого имени устройства
 String getDisplayName(const String& mac, const String& originalHostname) {
-  int fixedIndex = findFixedDeviceByMAC(mac);
-  if (fixedIndex != -1 && fixedDevices[fixedIndex].customName.length() > 0) {
-    return fixedDevices[fixedIndex].customName;
-  }
   return originalHostname.length() > 0 ? originalHostname : "Unknown";
-}
-
-// Функция для проверки наличия кастомного имени
-bool hasCustomName(const String& mac) {
-  int fixedIndex = findFixedDeviceByMAC(mac);
-  return (fixedIndex != -1 && fixedDevices[fixedIndex].customName.length() > 0);
 }
 
 // Функция для добавления нового устройства
 void addDevice(const String& ip, const String& mac, const String& hostname, int rssi) {
   int index = findDeviceByMAC(mac);
-  unsigned long currentTime = millis() / 1000;
-  
-  // Проверяем есть ли фиксированное устройство для этого MAC
-  int fixedIndex = findFixedDeviceByMAC(mac);
-  String actualIP = ip;
-  bool isFixed = false;
-  String displayName = getDisplayName(mac, hostname);
-  
-  if (fixedIndex != -1 && fixedDevices[fixedIndex].ip.length() > 0) {
-    actualIP = fixedDevices[fixedIndex].ip;
-    isFixed = true;
-  }
   
   if (index == -1) {
     if (deviceCount < MAX_DEVICES) {
-      devices[deviceCount].ip = actualIP;
+      devices[deviceCount].ip = ip;
       devices[deviceCount].mac = mac;
       devices[deviceCount].hostname = hostname;
-      devices[deviceCount].firstSeen = currentTime;
-      devices[deviceCount].lastSeen = currentTime;
       devices[deviceCount].rssi = rssi;
-      devices[deviceCount].ipFixed = isFixed;
+      devices[deviceCount].ipFixed = false;
+      devices[deviceCount].hasMPU6050 = false;
+      devices[deviceCount].pitch = 0;
+      devices[deviceCount].roll = 0;
+      devices[deviceCount].yaw = 0;
       deviceCount++;
       
-      Serial.printf("New device: %s (%s) - %s - RSSI: %d - Fixed: %s\n", 
-                   displayName.c_str(), actualIP.c_str(), mac.c_str(), rssi, isFixed ? "Yes" : "No");
+      Serial.printf("New device: %s (%s) - %s - RSSI: %d\n", 
+                   hostname.c_str(), ip.c_str(), mac.c_str(), rssi);
     }
   } else {
-    devices[index].lastSeen = currentTime;
     devices[index].rssi = rssi;
-    devices[index].ip = actualIP;
-    devices[index].ipFixed = isFixed;
-    // Обновляем hostname только если нет кастомного имени
-    if (hostname.length() > 0 && !hasCustomName(mac)) {
+    devices[index].ip = ip;
+    if (hostname.length() > 0) {
       devices[index].hostname = hostname;
     }
   }
-}
-
-// Функция для фиксации IP адреса
-bool fixIPAddress(const String& mac, const String& ip) {
-  int index = findFixedDeviceByMAC(mac);
-  
-  if (index == -1) {
-    if (fixedDeviceCount < MAX_FIXED_DEVICES) {
-      fixedDevices[fixedDeviceCount].mac = mac;
-      fixedDevices[fixedDeviceCount].ip = ip;
-      fixedDevices[fixedDeviceCount].customName = "";
-      fixedDeviceCount++;
-      
-      // Обновляем устройство если оно есть в списке
-      int deviceIndex = findDeviceByMAC(mac);
-      if (deviceIndex != -1) {
-        devices[deviceIndex].ip = ip;
-        devices[deviceIndex].ipFixed = true;
-      }
-      
-      saveFixedDevicesToEEPROM();
-      return true;
-    }
-  } else {
-    fixedDevices[index].ip = ip;
-    
-    // Обновляем устройство если оно есть в списке
-    int deviceIndex = findDeviceByMAC(mac);
-    if (deviceIndex != -1) {
-      devices[deviceIndex].ip = ip;
-      devices[deviceIndex].ipFixed = true;
-    }
-    
-    saveFixedDevicesToEEPROM();
-    return true;
-  }
-  return false;
-}
-
-// Функция для установки имени устройства
-bool setDeviceName(const String& mac, const String& name) {
-  int index = findFixedDeviceByMAC(mac);
-  
-  if (index == -1) {
-    // Создаем новую запись с именем но без фиксированного IP
-    if (fixedDeviceCount < MAX_FIXED_DEVICES) {
-      fixedDevices[fixedDeviceCount].mac = mac;
-      fixedDevices[fixedDeviceCount].ip = "";
-      fixedDevices[fixedDeviceCount].customName = name;
-      fixedDeviceCount++;
-      
-      Serial.printf("Custom name set: %s -> %s\n", mac.c_str(), name.c_str());
-      saveFixedDevicesToEEPROM();
-      return true;
-    }
-  } else {
-    // Обновляем существующую запись
-    fixedDevices[index].customName = name;
-    Serial.printf("Custom name updated: %s -> %s\n", mac.c_str(), name.c_str());
-    saveFixedDevicesToEEPROM();
-    return true;
-  }
-  return false;
-}
-
-// Функция для очистки фиксированных устройств
-void clearFixedDevices() {
-  fixedDeviceCount = 0;
-  Serial.println("Fixed devices cleared");
 }
 
 // Функция для сканирования сети
@@ -617,83 +389,6 @@ void scanNetwork() {
   
   Serial.printf("Scan complete. Found %d online devices\n", onlineCount);
   lastScanTime = millis();
-}
-
-// Функция для сохранения фиксированных устройств в EEPROM
-void saveFixedDevicesToEEPROM() {
-  EEPROM.begin(512);
-  
-  int addr = 256; // Начинаем с адреса 256 для фиксированных устройств
-  EEPROM.write(addr++, fixedDeviceCount);
-  
-  for (int i = 0; i < fixedDeviceCount; i++) {
-    // Сохраняем MAC
-    String mac = fixedDevices[i].mac;
-    EEPROM.write(addr++, mac.length());
-    for (int j = 0; j < mac.length(); j++) {
-      EEPROM.write(addr++, mac[j]);
-    }
-    
-    // Сохраняем IP
-    String ip = fixedDevices[i].ip;
-    EEPROM.write(addr++, ip.length());
-    for (int j = 0; j < ip.length(); j++) {
-      EEPROM.write(addr++, ip[j]);
-    }
-    
-    // Сохраняем кастомное имя
-    String name = fixedDevices[i].customName;
-    EEPROM.write(addr++, name.length());
-    for (int j = 0; j < name.length(); j++) {
-      EEPROM.write(addr++, name[j]);
-    }
-  }
-  
-  EEPROM.commit();
-  EEPROM.end();
-  
-  Serial.printf("Fixed devices saved to EEPROM: %d\n", fixedDeviceCount);
-}
-
-// Функция для загрузки фиксированных устройств из EEPROM
-void loadFixedDevicesFromEEPROM() {
-  EEPROM.begin(512);
-  
-  int addr = 256;
-  fixedDeviceCount = EEPROM.read(addr++);
-  
-  if (fixedDeviceCount > MAX_FIXED_DEVICES) fixedDeviceCount = 0;
-  
-  for (int i = 0; i < fixedDeviceCount; i++) {
-    // Загружаем MAC
-    int macLen = EEPROM.read(addr++);
-    String mac = "";
-    for (int j = 0; j < macLen; j++) {
-      mac += char(EEPROM.read(addr++));
-    }
-    
-    // Загружаем IP
-    int ipLen = EEPROM.read(addr++);
-    String ip = "";
-    for (int j = 0; j < ipLen; j++) {
-      ip += char(EEPROM.read(addr++));
-    }
-    
-    // Загружаем кастомное имя
-    int nameLen = EEPROM.read(addr++);
-    String name = "";
-    for (int j = 0; j < nameLen; j++) {
-      name += char(EEPROM.read(addr++));
-    }
-    
-    fixedDevices[i].mac = mac;
-    fixedDevices[i].ip = ip;
-    fixedDevices[i].customName = name;
-  }
-  
-  EEPROM.end();
-  
-  Serial.printf("Fixed devices loaded from EEPROM: %d\n", fixedDeviceCount);
 }
 
 // Функция для сохранения настроек сети в EEPROM
@@ -759,7 +454,7 @@ void loadNetworkSettingsFromEEPROM() {
     // Значения по умолчанию
     networkSettings.ssid = ap_ssid;
     networkSettings.password = ap_password;
-    networkSettings.subnet = "4";
+    networkSettings.subnet = "50";
   }
   
   EEPROM.end();
@@ -788,7 +483,7 @@ void setupWiFiAP() {
   // Конвертируем подсеть в число
   int subnet = networkSettings.subnet.toInt();
   if (subnet < 1 || subnet > 254) {
-    subnet = 4; // Значение по умолчанию при ошибке
+    subnet = 50; // Значение по умолчанию при ошибке
   }
   
   IPAddress local_ip(192, 168, subnet, 1);
@@ -803,14 +498,44 @@ void setupWiFiAP() {
   Serial.print("IP: "); Serial.println(WiFi.softAPIP());
 }
 
+// Обработчик WebSocket событий
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[%u] Connected from %d.%d.%d.%d\n", num, ip[0], ip[1], ip[2], ip[3]);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        Serial.printf("[%u] Received: %s\n", num, message);
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.printf("[%u] WebSocket error\n", num);
+      break;
+  }
+}
+
 // Обработчик главной страницы
 void handleRoot() {
-  server.send(200, "text/html; charset=UTF-8", htmlPage);
+  Serial.println("Serving HTML page...");
+  server.send_P(200, "text/html", htmlPage);
 }
 
 // API для получения списка устройств
 void handleApiDevices() {
-  DynamicJsonDocument doc(2048);
+  Serial.println("API devices requested");
+  
+  DynamicJsonDocument doc(1024);
   doc["totalDevices"] = deviceCount;
   doc["onlineDevices"] = deviceCount;
   doc["espIp"] = WiFi.softAPIP().toString();
@@ -825,64 +550,11 @@ void handleApiDevices() {
     deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
     deviceObj["rssi"] = devices[i].rssi;
     deviceObj["ipFixed"] = devices[i].ipFixed;
-    deviceObj["hasCustomName"] = hasCustomName(devices[i].mac);
   }
   
   String json;
   serializeJson(doc, json);
-  server.send(200, "application/json; charset=UTF-8", json);
-}
-
-// API для фиксации IP адреса
-void handleApiFixIP() {
-  if (server.method() == HTTP_POST) {
-    String mac = server.arg("mac");
-    String ip = server.arg("ip");
-    
-    Serial.printf("Fix IP request - MAC: %s, IP: %s\n", mac.c_str(), ip.c_str());
-    
-    if (mac.length() > 0 && ip.length() > 0) {
-      if (fixIPAddress(mac, ip)) {
-        server.send(200, "application/json", "{\"status\":\"success\"}");
-        Serial.println("IP fixed successfully");
-      } else {
-        server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot fix IP - memory full\"}");
-        Serial.println("Error: Cannot fix IP - memory full");
-      }
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters - MAC or IP empty\"}");
-      Serial.println("Error: Missing parameters");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-    Serial.println("Error: Method not allowed");
-  }
-}
-
-// API для установки имени устройства
-void handleApiSetName() {
-  if (server.method() == HTTP_POST) {
-    String mac = server.arg("mac");
-    String name = server.arg("name");
-    
-    Serial.printf("Set name request - MAC: %s, Name: %s\n", mac.c_str(), name.c_str());
-    
-    if (mac.length() > 0 && name.length() > 0) {
-      if (setDeviceName(mac, name)) {
-        server.send(200, "application/json", "{\"status\":\"success\"}");
-        Serial.println("Device name set successfully");
-      } else {
-        server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot set name - memory full\"}");
-        Serial.println("Error: Cannot set name - memory full");
-      }
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters - MAC or name empty\"}");
-      Serial.println("Error: Missing parameters");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-    Serial.println("Error: Method not allowed");
-  }
+  server.send(200, "application/json", json);
 }
 
 // API для сохранения настроек
@@ -895,13 +567,6 @@ void handleApiSettings() {
     Serial.printf("Settings request - SSID: %s, Subnet: %s\n", ssid.c_str(), subnet.c_str());
     
     if (ssid.length() > 0 && password.length() >= 8 && subnet.length() > 0) {
-      // Очищаем фиксированные устройства при смене подсети
-      if (networkSettings.subnet != subnet) {
-        clearFixedDevices();
-        saveFixedDevicesToEEPROM();
-        Serial.println("Fixed IPs cleared due to subnet change");
-      }
-      
       // Сохраняем новые настройки
       networkSettings.ssid = ssid;
       networkSettings.password = password;
@@ -939,22 +604,23 @@ void setup() {
   // Загрузка настроек сети из EEPROM
   loadNetworkSettingsFromEEPROM();
   
-  // Загрузка фиксированных устройств из EEPROM
-  loadFixedDevicesFromEEPROM();
-  
   // Настройка WiFi
   setupWiFiAP();
   
   // Настройка маршрутов сервера
   server.on("/", handleRoot);
   server.on("/api/devices", handleApiDevices);
-  server.on("/api/fixip", HTTP_POST, handleApiFixIP);
-  server.on("/api/setname", HTTP_POST, handleApiSetName);
   server.on("/api/settings", HTTP_POST, handleApiSettings);
   
   // Запуск сервера
   server.begin();
-  Serial.println("HTTP server started");
+  
+  // Запуск WebSocket сервера
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  
+  Serial.println("HTTP server started on port 80");
+  Serial.println("WebSocket server started on port 81");
   
   // Первое сканирование
   scanNetwork();
@@ -964,6 +630,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  webSocket.loop();
   
   if (millis() - lastScanTime >= SCAN_INTERVAL) {
     scanNetwork();
