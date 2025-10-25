@@ -14,7 +14,7 @@ const char* ssid = "ESP8266_Network_Monitor";
 const char* password = "12345678";
 
 // Multi-user socket server settings
-const char* SOCKET_SERVER_HOST = "192.168.4.1";
+String SOCKET_SERVER_HOST = "192.168.4.1";
 const uint16_t SOCKET_SERVER_PORT = 81;
 bool socketServerConnected = false;
 unsigned long lastSocketReconnectAttempt = 0;
@@ -74,6 +74,11 @@ bool isValidDeviceName(const String& name) {
   }
   
   return true;
+}
+// Функция для получения IP адреса основного шлюза
+String getGatewayIP() {
+  IPAddress gateway = WiFi.gatewayIP();
+  return gateway.toString();
 }
 
 // Функция для очистки имени устройства
@@ -667,13 +672,15 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 // Функция для подключения к многопользовательскому сокет-серверу
+// В функции connectToSocketServer():
 void connectToSocketServer() {
   Serial.println("Attempting to connect to multi-user socket server...");
+  SOCKET_SERVER_HOST = getGatewayIP(); // Теперь это будет работать
   Serial.print("Host: "); Serial.print(SOCKET_SERVER_HOST);
   Serial.print(" Port: "); Serial.println(SOCKET_SERVER_PORT);
   
   // Настраиваем клиент WebSocket
-  socketClient.begin(SOCKET_SERVER_HOST, SOCKET_SERVER_PORT, "/");
+  socketClient.begin(SOCKET_SERVER_HOST.c_str(), SOCKET_SERVER_PORT, "/");
   socketClient.onEvent(socketClientEvent);
   socketClient.setReconnectInterval(SOCKET_RECONNECT_INTERVAL);
   
