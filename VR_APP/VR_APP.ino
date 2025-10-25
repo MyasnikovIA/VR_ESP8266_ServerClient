@@ -1,12 +1,11 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
 #include <EEPROM.h>
 #include <ArduinoJson.h>
 
-// Настройки WiFi
-const char* ssid = "ESP8266_Network_Monitor";
-const char* password = "12345678";
+// Настройки WiFi по умолчанию
+const char* ap_ssid = "ESP8266_Network_Monitor";
+const char* ap_password = "12345678";
 
 // Создание веб-сервера на порту 80
 ESP8266WebServer server(80);
@@ -29,6 +28,14 @@ struct FixedDevice {
   String customName;
 };
 
+// Структура для настроек сети
+struct NetworkSettings {
+  String ssid;
+  String password;
+  String subnet;
+  bool configured;
+};
+
 // Массив для хранения подключенных устройств
 const int MAX_DEVICES = 50;
 DeviceInfo devices[MAX_DEVICES];
@@ -39,6 +46,9 @@ const int MAX_FIXED_DEVICES = 20;
 FixedDevice fixedDevices[MAX_FIXED_DEVICES];
 int fixedDeviceCount = 0;
 
+// Настройки сети
+NetworkSettings networkSettings;
+
 // Время последнего сканирования
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
@@ -46,14 +56,19 @@ const unsigned long SCAN_INTERVAL = 10000;
 // Прототипы функций
 void saveFixedDevicesToEEPROM();
 void loadFixedDevicesFromEEPROM();
+void saveNetworkSettingsToEEPROM();
+void loadNetworkSettingsFromEEPROM();
+void clearFixedDevices();
 int findDeviceByMAC(const String& mac);
 int findFixedDeviceByMAC(const String& mac);
 String getDisplayName(const String& mac, const String& originalHostname);
 bool hasCustomName(const String& mac);
 bool fixIPAddress(const String& mac, const String& ip);
 bool setDeviceName(const String& mac, const String& name);
+void setupWiFiAP();
+void scanNetwork();
 
-// HTML страница
+// Упрощенная HTML страница
 const String htmlPage = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
@@ -62,51 +77,49 @@ const String htmlPage = R"rawliteral(
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Network Monitor</title>
     <style>
-        body { font-family: Arial; margin: 20px; background: #f0f0f0; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
-        .header { text-align: center; margin-bottom: 20px; padding: 20px; background: #2c3e50; color: white; border-radius: 8px; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
-        .stat-card { background: #ecf0f1; padding: 10px; border-radius: 5px; text-align: center; }
-        .stat-number { font-size: 20px; font-weight: bold; color: #2c3e50; }
-        .stat-label { color: #7f8c8d; font-size: 12px; }
-        .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin-bottom: 20px; }
-        .device-card { background: white; border: 1px solid #ddd; border-radius: 5px; padding: 10px; }
-        .device-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
-        .device-name { font-weight: bold; color: #2c3e50; }
-        .device-status { background: #27ae60; color: white; padding: 2px 6px; border-radius: 8px; font-size: 10px; }
+        body { font-family: Arial; margin: 10px; background: #f0f0f0; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 15px; border-radius: 8px; }
+        .header { text-align: center; margin-bottom: 15px; padding: 15px; background: #2c3e50; color: white; border-radius: 6px; }
+        .stats { display: flex; justify-content: space-around; margin-bottom: 15px; flex-wrap: wrap; }
+        .stat-card { background: #ecf0f1; padding: 8px; border-radius: 4px; text-align: center; min-width: 100px; margin: 3px; }
+        .stat-number { font-size: 18px; font-weight: bold; color: #2c3e50; }
+        .stat-label { color: #7f8c8d; font-size: 11px; }
+        .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; margin-bottom: 15px; }
+        .device-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: 8px; }
+        .device-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
+        .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; }
+        .device-status { background: #27ae60; color: white; padding: 2px 5px; border-radius: 6px; font-size: 9px; }
         .status-fixed { background: #e67e22; }
-        .info-row { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 12px; }
+        .info-row { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 11px; }
         .info-label { color: #7f8c8d; }
         .info-value { color: #2c3e50; font-family: monospace; }
-        .controls { text-align: center; margin: 15px 0; }
-        .btn { padding: 6px 12px; margin: 3px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 11px; }
+        .controls { text-align: center; margin: 10px 0; }
+        .btn { padding: 5px 10px; margin: 2px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 10px; }
         .btn:hover { background: #2980b9; }
         .btn-fixed { background: #9b59b6; }
         .btn-edit { background: #f39c12; }
-        .refresh-loading { background: #f39c12 !important; }
-        .last-update { text-align: center; color: #7f8c8d; font-size: 12px; margin-top: 15px; }
-        .no-devices { text-align: center; color: #7f8c8d; padding: 20px; }
-        .fixed-badge { background: #9b59b6; color: white; padding: 1px 4px; border-radius: 6px; font-size: 9px; margin-left: 3px; }
-        .name-badge { background: #f39c12; color: white; padding: 1px 4px; border-radius: 6px; font-size: 9px; margin-left: 3px; }
-        
-        /* Modal styles */
+        .btn-settings { background: #34495e; }
+        .last-update { text-align: center; color: #7f8c8d; font-size: 11px; margin-top: 10px; }
+        .no-devices { text-align: center; color: #7f8c8d; padding: 15px; }
+        .fixed-badge { background: #9b59b6; color: white; padding: 1px 3px; border-radius: 4px; font-size: 8px; margin-left: 2px; }
+        .name-badge { background: #f39c12; color: white; padding: 1px 3px; border-radius: 4px; font-size: 8px; margin-left: 2px; }
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
-        .modal-content { background-color: white; margin: 15% auto; padding: 20px; border-radius: 8px; width: 300px; }
-        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
-        .modal-title { font-weight: bold; font-size: 16px; }
-        .close { color: #aaa; font-size: 20px; font-weight: bold; cursor: pointer; }
-        .close:hover { color: black; }
-        .form-group { margin-bottom: 15px; }
-        .form-label { display: block; margin-bottom: 5px; font-size: 12px; color: #7f8c8d; }
-        .form-input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-        .modal-buttons { display: flex; justify-content: flex-end; gap: 10px; }
+        .modal-content { background-color: white; margin: 15% auto; padding: 15px; border-radius: 6px; width: 300px; max-width: 90%; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .modal-title { font-weight: bold; font-size: 14px; }
+        .close { color: #aaa; font-size: 18px; font-weight: bold; cursor: pointer; }
+        .form-group { margin-bottom: 10px; }
+        .form-label { display: block; margin-bottom: 3px; font-size: 11px; color: #7f8c8d; }
+        .form-input { width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box; font-size: 11px; }
+        .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+        .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 8px; border-radius: 3px; margin-bottom: 10px; font-size: 11px; color: #856404; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🖥️ Network Monitor</h1>
-            <p>Real-time device monitoring with custom names</p>
+            <h1 style="margin:0;font-size:20px;">🖥️ Network Monitor</h1>
+            <p style="margin:5px 0 0 0;font-size:12px;">Real-time device monitoring</p>
         </div>
         
         <div class="stats">
@@ -124,7 +137,7 @@ const String htmlPage = R"rawliteral(
             </div>
         </div>
         
-        <h3>📱 Connected Devices</h3>
+        <h3 style="margin:0 0 10px 0;font-size:16px;">📱 Connected Devices</h3>
         <div id="devicesContainer" class="devices-grid">
             <div class="no-devices">No devices found</div>
         </div>
@@ -132,6 +145,7 @@ const String htmlPage = R"rawliteral(
         <div class="controls">
             <button class="btn" onclick="refreshData()" id="refreshBtn">🔄 Refresh</button>
             <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">🔄 Auto (10s)</button>
+            <button class="btn btn-settings" onclick="showSettings()">⚙️ Settings</button>
         </div>
         
         <div class="last-update">
@@ -139,12 +153,11 @@ const String htmlPage = R"rawliteral(
         </div>
     </div>
 
-    <!-- Modal for editing device name -->
     <div id="editModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
                 <div class="modal-title">✏️ Edit Device Name</div>
-                <span class="close" onclick="closeModal()">&times;</span>
+                <span class="close" onclick="closeModal('editModal')">&times;</span>
             </div>
             <div class="form-group">
                 <label class="form-label">MAC Address:</label>
@@ -156,11 +169,39 @@ const String htmlPage = R"rawliteral(
             </div>
             <div class="form-group">
                 <label class="form-label">Device Name:</label>
-                <input type="text" id="editName" class="form-input" maxlength="30" placeholder="Enter custom name">
+                <input type="text" id="editName" class="form-input" maxlength="20" placeholder="Enter custom name">
             </div>
             <div class="modal-buttons">
-                <button class="btn" onclick="closeModal()">Cancel</button>
+                <button class="btn" onclick="closeModal('editModal')">Cancel</button>
                 <button class="btn btn-edit" onclick="saveDeviceName()">💾 Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">⚙️ Network Settings</div>
+                <span class="close" onclick="closeModal('settingsModal')">&times;</span>
+            </div>
+            <div class="warning">
+                ⚠️ Changing subnet will clear all fixed IP addresses!
+            </div>
+            <div class="form-group">
+                <label class="form-label">WiFi SSID:</label>
+                <input type="text" id="settingsSsid" class="form-input" value="ESP8266_Network_Monitor" maxlength="20">
+            </div>
+            <div class="form-group">
+                <label class="form-label">WiFi Password:</label>
+                <input type="text" id="settingsPassword" class="form-input" value="12345678" maxlength="20">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Subnet (1-254):</label>
+                <input type="number" id="settingsSubnet" class="form-input" value="4" min="1" max="254">
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeModal('settingsModal')">Cancel</button>
+                <button class="btn btn-settings" onclick="saveSettings()">💾 Save & Restart</button>
             </div>
         </div>
     </div>
@@ -181,6 +222,7 @@ const String htmlPage = R"rawliteral(
                 })
                 .catch(e => {
                     console.error('Error:', e);
+                    alert('Error loading data');
                 })
                 .finally(() => {
                     btn.innerHTML = '🔄 Refresh';
@@ -223,13 +265,9 @@ const String htmlPage = R"rawliteral(
                         <span class="info-label">Signal:</span>
                         <span class="info-value">${device.rssi} dBm</span>
                     </div>
-                    <div style="text-align: center; margin-top: 8px; display: flex; justify-content: center; gap: 5px;">
-                        <button class="btn btn-fixed" onclick="fixIP('${device.mac}', '${device.ip}')">
-                            📌 Fix IP
-                        </button>
-                        <button class="btn btn-edit" onclick="editDeviceName('${device.mac}', '${device.ip}', '${device.displayName.replace(/'/g, "\\'")}')">
-                            ✏️ Edit
-                        </button>
+                    <div style="text-align: center; margin-top: 6px; display: flex; justify-content: center; gap: 4px;">
+                        <button class="btn btn-fixed" onclick="fixIP('${device.mac}', '${device.ip}')">📌 Fix IP</button>
+                        <button class="btn btn-edit" onclick="editDeviceName('${device.mac}', '${device.ip}', '${device.displayName.replace(/'/g, "\\'")}')">✏️ Edit</button>
                     </div>
                 </div>
             `).join('');
@@ -238,7 +276,6 @@ const String htmlPage = R"rawliteral(
         function getDeviceIcon(device) {
             const mac = (device.mac || '').toLowerCase();
             const name = (device.displayName || '').toLowerCase();
-            
             if (mac.includes('apple') || name.includes('iphone') || name.includes('ipad')) return '📱';
             if (name.includes('android')) return '📱';
             if (name.includes('pc') || name.includes('desktop') || name.includes('laptop')) return '💻';
@@ -284,9 +321,15 @@ const String htmlPage = R"rawliteral(
             document.getElementById('editModal').style.display = 'block';
         }
         
-        function closeModal() {
-            document.getElementById('editModal').style.display = 'none';
-            currentEditMac = '';
+        function showSettings() {
+            document.getElementById('settingsModal').style.display = 'block';
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+            if (modalId === 'editModal') {
+                currentEditMac = '';
+            }
         }
         
         function saveDeviceName() {
@@ -309,7 +352,7 @@ const String htmlPage = R"rawliteral(
             .then(r => r.json())
             .then(data => {
                 if (data.status === 'success') {
-                    closeModal();
+                    closeModal('editModal');
                     refreshData();
                 } else {
                     alert('Error: ' + (data.message || 'Unknown error'));
@@ -318,6 +361,56 @@ const String htmlPage = R"rawliteral(
             .catch(e => {
                 console.error('Error:', e);
                 alert('Error saving device name');
+            });
+        }
+        
+        function saveSettings() {
+            const ssid = document.getElementById('settingsSsid').value.trim();
+            const password = document.getElementById('settingsPassword').value.trim();
+            const subnet = document.getElementById('settingsSubnet').value;
+            
+            if (!ssid || !password || !subnet) {
+                alert('Please fill all fields');
+                return;
+            }
+            
+            if (password.length < 8) {
+                alert('Password must be at least 8 characters long');
+                return;
+            }
+            
+            if (subnet < 1 || subnet > 254) {
+                alert('Subnet must be between 1 and 254');
+                return;
+            }
+            
+            if (!confirm('Changing subnet will clear all fixed IP addresses! Continue?')) {
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('ssid', ssid);
+            formData.append('password', password);
+            formData.append('subnet', subnet);
+            
+            fetch('/api/settings', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Settings saved! ESP will restart...');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                } else {
+                    alert('Error: ' + (data.message || 'Unknown error'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Error saving settings');
             });
         }
         
@@ -335,15 +428,15 @@ const String htmlPage = R"rawliteral(
             }
         }
         
-        // Close modal when clicking outside
         window.onclick = function(event) {
-            const modal = document.getElementById('editModal');
-            if (event.target === modal) {
-                closeModal();
+            const modals = document.getElementsByClassName('modal');
+            for (let modal of modals) {
+                if (event.target === modal) {
+                    modal.style.display = 'none';
+                }
             }
         }
         
-        // Load data on start
         document.addEventListener('DOMContentLoaded', refreshData);
     </script>
 </body>
@@ -396,7 +489,7 @@ void addDevice(const String& ip, const String& mac, const String& hostname, int 
   bool isFixed = false;
   String displayName = getDisplayName(mac, hostname);
   
-  if (fixedIndex != -1) {
+  if (fixedIndex != -1 && fixedDevices[fixedIndex].ip.length() > 0) {
     actualIP = fixedDevices[fixedIndex].ip;
     isFixed = true;
   }
@@ -490,6 +583,12 @@ bool setDeviceName(const String& mac, const String& name) {
   return false;
 }
 
+// Функция для очистки фиксированных устройств
+void clearFixedDevices() {
+  fixedDeviceCount = 0;
+  Serial.println("Fixed devices cleared");
+}
+
 // Функция для сканирования сети
 void scanNetwork() {
   struct station_info *station = wifi_softap_get_station_info();
@@ -522,9 +621,9 @@ void scanNetwork() {
 
 // Функция для сохранения фиксированных устройств в EEPROM
 void saveFixedDevicesToEEPROM() {
-  EEPROM.begin(1024); // Увеличили размер для хранения имен
+  EEPROM.begin(512);
   
-  int addr = 0;
+  int addr = 256; // Начинаем с адреса 256 для фиксированных устройств
   EEPROM.write(addr++, fixedDeviceCount);
   
   for (int i = 0; i < fixedDeviceCount; i++) {
@@ -558,9 +657,9 @@ void saveFixedDevicesToEEPROM() {
 
 // Функция для загрузки фиксированных устройств из EEPROM
 void loadFixedDevicesFromEEPROM() {
-  EEPROM.begin(1024);
+  EEPROM.begin(512);
   
-  int addr = 0;
+  int addr = 256;
   fixedDeviceCount = EEPROM.read(addr++);
   
   if (fixedDeviceCount > MAX_FIXED_DEVICES) fixedDeviceCount = 0;
@@ -597,15 +696,111 @@ void loadFixedDevicesFromEEPROM() {
   Serial.printf("Fixed devices loaded from EEPROM: %d\n", fixedDeviceCount);
 }
 
+// Функция для сохранения настроек сети в EEPROM
+void saveNetworkSettingsToEEPROM() {
+  EEPROM.begin(512);
+  
+  int addr = 0;
+  EEPROM.write(addr++, networkSettings.configured ? 1 : 0);
+  
+  // Сохраняем SSID
+  EEPROM.write(addr++, networkSettings.ssid.length());
+  for (int j = 0; j < networkSettings.ssid.length(); j++) {
+    EEPROM.write(addr++, networkSettings.ssid[j]);
+  }
+  
+  // Сохраняем пароль
+  EEPROM.write(addr++, networkSettings.password.length());
+  for (int j = 0; j < networkSettings.password.length(); j++) {
+    EEPROM.write(addr++, networkSettings.password[j]);
+  }
+  
+  // Сохраняем подсеть
+  EEPROM.write(addr++, networkSettings.subnet.length());
+  for (int j = 0; j < networkSettings.subnet.length(); j++) {
+    EEPROM.write(addr++, networkSettings.subnet[j]);
+  }
+  
+  EEPROM.commit();
+  EEPROM.end();
+  
+  Serial.println("Network settings saved to EEPROM");
+}
+
+// Функция для загрузки настроек сети из EEPROM
+void loadNetworkSettingsFromEEPROM() {
+  EEPROM.begin(512);
+  
+  int addr = 0;
+  networkSettings.configured = (EEPROM.read(addr++) == 1);
+  
+  if (networkSettings.configured) {
+    // Загружаем SSID
+    int ssidLen = EEPROM.read(addr++);
+    networkSettings.ssid = "";
+    for (int j = 0; j < ssidLen; j++) {
+      networkSettings.ssid += char(EEPROM.read(addr++));
+    }
+    
+    // Загружаем пароль
+    int passwordLen = EEPROM.read(addr++);
+    networkSettings.password = "";
+    for (int j = 0; j < passwordLen; j++) {
+      networkSettings.password += char(EEPROM.read(addr++));
+    }
+    
+    // Загружаем подсеть
+    int subnetLen = EEPROM.read(addr++);
+    networkSettings.subnet = "";
+    for (int j = 0; j < subnetLen; j++) {
+      networkSettings.subnet += char(EEPROM.read(addr++));
+    }
+  } else {
+    // Значения по умолчанию
+    networkSettings.ssid = ap_ssid;
+    networkSettings.password = ap_password;
+    networkSettings.subnet = "4";
+  }
+  
+  EEPROM.end();
+  
+  Serial.printf("Network settings loaded: SSID=%s, Subnet=%s\n", 
+                networkSettings.ssid.c_str(), networkSettings.subnet.c_str());
+}
+
 // Функция для очистки EEPROM
 void clearEEPROM() {
-  EEPROM.begin(1024);
-  for (int i = 0; i < 1024; i++) {
+  EEPROM.begin(512);
+  for (int i = 0; i < 512; i++) {
     EEPROM.write(i, 0);
   }
   EEPROM.commit();
   EEPROM.end();
   Serial.println("EEPROM cleared successfully");
+}
+
+// Настройка WiFi в режиме точки доступа
+void setupWiFiAP() {
+  Serial.println("Setting up Access Point...");
+  
+  WiFi.mode(WIFI_AP);
+  
+  // Конвертируем подсеть в число
+  int subnet = networkSettings.subnet.toInt();
+  if (subnet < 1 || subnet > 254) {
+    subnet = 4; // Значение по умолчанию при ошибке
+  }
+  
+  IPAddress local_ip(192, 168, subnet, 1);
+  IPAddress gateway(192, 168, subnet, 1);
+  IPAddress subnet_mask(255, 255, 255, 0);
+  
+  WiFi.softAP(networkSettings.ssid.c_str(), networkSettings.password.c_str());
+  WiFi.softAPConfig(local_ip, gateway, subnet_mask);
+  
+  Serial.println("Access Point Started");
+  Serial.print("SSID: "); Serial.println(networkSettings.ssid);
+  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
 }
 
 // Обработчик главной страницы
@@ -615,7 +810,7 @@ void handleRoot() {
 
 // API для получения списка устройств
 void handleApiDevices() {
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(2048);
   doc["totalDevices"] = deviceCount;
   doc["onlineDevices"] = deviceCount;
   doc["espIp"] = WiFi.softAPIP().toString();
@@ -676,12 +871,6 @@ void handleApiSetName() {
       if (setDeviceName(mac, name)) {
         server.send(200, "application/json", "{\"status\":\"success\"}");
         Serial.println("Device name set successfully");
-        
-        // Обновляем отображаемое имя в активных устройствах
-        int deviceIndex = findDeviceByMAC(mac);
-        if (deviceIndex != -1) {
-          // Hostname не меняем, только отображаемое имя через функцию getDisplayName
-        }
       } else {
         server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Cannot set name - memory full\"}");
         Serial.println("Error: Cannot set name - memory full");
@@ -696,21 +885,46 @@ void handleApiSetName() {
   }
 }
 
-// Настройка WiFi в режиме точки доступа
-void setupWiFi() {
-  Serial.println("Setting up Access Point...");
-  
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, password);
-  
-  IPAddress local_ip(192, 168, 4, 1);
-  IPAddress gateway(192, 168, 4, 1);
-  IPAddress subnet(255, 255, 255, 0);
-  WiFi.softAPConfig(local_ip, gateway, subnet);
-  
-  Serial.println("Access Point Started");
-  Serial.print("SSID: "); Serial.println(ssid);
-  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
+// API для сохранения настроек
+void handleApiSettings() {
+  if (server.method() == HTTP_POST) {
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+    String subnet = server.arg("subnet");
+    
+    Serial.printf("Settings request - SSID: %s, Subnet: %s\n", ssid.c_str(), subnet.c_str());
+    
+    if (ssid.length() > 0 && password.length() >= 8 && subnet.length() > 0) {
+      // Очищаем фиксированные устройства при смене подсети
+      if (networkSettings.subnet != subnet) {
+        clearFixedDevices();
+        saveFixedDevicesToEEPROM();
+        Serial.println("Fixed IPs cleared due to subnet change");
+      }
+      
+      // Сохраняем новые настройки
+      networkSettings.ssid = ssid;
+      networkSettings.password = password;
+      networkSettings.subnet = subnet;
+      networkSettings.configured = true;
+      
+      saveNetworkSettingsToEEPROM();
+      
+      server.send(200, "application/json", "{\"status\":\"success\"}");
+      Serial.println("Settings saved successfully");
+      
+      // Перезагрузка для применения новых настроек
+      delay(1000);
+      ESP.restart();
+      
+    } else {
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters - check SSID, password (min 8 chars) and subnet\"}");
+      Serial.println("Error: Invalid parameters");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+    Serial.println("Error: Method not allowed");
+  }
 }
 
 void setup() {
@@ -722,17 +936,21 @@ void setup() {
   // Очистка EEPROM при первом запуске (раскомментировать для очистки)
   // clearEEPROM();
   
+  // Загрузка настроек сети из EEPROM
+  loadNetworkSettingsFromEEPROM();
+  
   // Загрузка фиксированных устройств из EEPROM
   loadFixedDevicesFromEEPROM();
   
   // Настройка WiFi
-  setupWiFi();
+  setupWiFiAP();
   
   // Настройка маршрутов сервера
   server.on("/", handleRoot);
   server.on("/api/devices", handleApiDevices);
   server.on("/api/fixip", HTTP_POST, handleApiFixIP);
   server.on("/api/setname", HTTP_POST, handleApiSetName);
+  server.on("/api/settings", HTTP_POST, handleApiSettings);
   
   // Запуск сервера
   server.begin();
