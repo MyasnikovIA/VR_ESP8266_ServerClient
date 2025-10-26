@@ -331,7 +331,21 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         }
         
         function formatMac(mac) {
-            return mac ? mac.toUpperCase().match(/.{1,2}/g).join(':') : '';
+            if (!mac) return '';
+            
+            // Если MAC адрес уже в формате "VR:DeviceName", просто возвращаем его как есть
+            if (mac.startsWith('VR:')) {
+                return mac;
+            }
+            
+            // Если это обычный MAC адрес (6 байт в hex), форматируем его
+            const cleanMac = mac.replace(/:/g, '').toUpperCase();
+            if (cleanMac.length === 12) {
+                return cleanMac.match(/.{1,2}/g).join(':');
+            }
+            
+            // Если это какой-то другой формат, возвращаем как есть
+            return mac;
         }
         
         function showSettings() {
@@ -803,7 +817,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           String pongMsg = "PONG";
           webSocket.sendTXT(num, pongMsg);
         }
-        else if (message.startsWith("DEVICE_CONNECTED:")) {
+                else if (message.startsWith("DEVICE_CONNECTED:")) {
           // Обработка подключения нового устройства
           String deviceName = message.substring(17);
           Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
@@ -849,105 +863,87 @@ void handleRoot() {
   server.send_P(200, "text/html", htmlPage);
 }
 
-
 // API для получения списка устройств
 void handleApiDevices() {
   Serial.println("API devices requested");
   
   DynamicJsonDocument doc(2048);
-  doc["totalDevices"] = deviceCount;
   
-  // Подсчет онлайн устройств и VR-устройств
+  // Создаем массив для хранения уникальных устройств
+  DeviceInfo uniqueDevices[MAX_DEVICES];
+  int uniqueCount = 0;
+  
+  // Сначала проходим по всем устройствам и собираем устройства с MPU6050
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].hasMPU6050) {
+      bool exists = false;
+      for (int j = 0; j < uniqueCount; j++) {
+        if (uniqueDevices[j].ip == devices[i].ip) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        uniqueDevices[uniqueCount++] = devices[i];
+      }
+    }
+  }
+  
+  // Затем добавляем устройства без MPU6050
+  for (int i = 0; i < deviceCount; i++) {
+    if (!devices[i].hasMPU6050) {
+      bool exists = false;
+      for (int j = 0; j < uniqueCount; j++) {
+        if (uniqueDevices[j].ip == devices[i].ip) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        uniqueDevices[uniqueCount++] = devices[i];
+      }
+    }
+  }
+  
+  // Подсчет онлайн устройств и VR-устройств среди уникальных
   int onlineCount = 0;
   int vrCount = 0;
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].connected) {
+  for (int i = 0; i < uniqueCount; i++) {
+    if (uniqueDevices[i].connected) {
       onlineCount++;
     }
-    if (devices[i].hasMPU6050) {
+    if (uniqueDevices[i].hasMPU6050) {
       vrCount++;
     }
   }
   
+  doc["totalDevices"] = uniqueCount;
   doc["onlineDevices"] = onlineCount;
   doc["vrDevices"] = vrCount;
   doc["espIp"] = WiFi.softAPIP().toString();
   
   JsonArray devicesArray = doc.createNestedArray("devices");
   
-  // Создаем массив для отслеживания уникальных IP
-  String uniqueIPs[MAX_DEVICES];
-  int uniqueCount = 0;
-  
-  // Сначала добавляем устройства с MPU6050
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].hasMPU6050) {
-      bool ipExists = false;
-      for (int j = 0; j < uniqueCount; j++) {
-        if (uniqueIPs[j] == devices[i].ip) {
-          ipExists = true;
-          break;
-        }
-      }
-      
-      if (!ipExists) {
-        // Добавляем IP в список уникальных
-        uniqueIPs[uniqueCount++] = devices[i].ip;
-        
-        // Добавляем устройство в JSON
-        JsonObject deviceObj = devicesArray.createNestedObject();
-        deviceObj["ip"] = devices[i].ip;
-        deviceObj["mac"] = devices[i].mac;
-        deviceObj["hostname"] = devices[i].hostname;
-        deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
-        deviceObj["rssi"] = devices[i].rssi;
-        deviceObj["ipFixed"] = devices[i].ipFixed;
-        deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
-        deviceObj["connected"] = devices[i].connected;
-        
-        if (devices[i].hasMPU6050) {
-          deviceObj["pitch"] = devices[i].pitch;
-          deviceObj["roll"] = devices[i].roll;
-          deviceObj["yaw"] = devices[i].yaw;
-          deviceObj["relPitch"] = devices[i].relPitch;
-          deviceObj["relRoll"] = devices[i].relRoll;
-          deviceObj["relYaw"] = devices[i].relYaw;
-        }
-      }
+  for (int i = 0; i < uniqueCount; i++) {
+    JsonObject deviceObj = devicesArray.createNestedObject();
+    deviceObj["ip"] = uniqueDevices[i].ip;
+    deviceObj["mac"] = uniqueDevices[i].mac;
+    deviceObj["hostname"] = uniqueDevices[i].hostname;
+    deviceObj["displayName"] = getDisplayName(uniqueDevices[i].mac, uniqueDevices[i].hostname);
+    deviceObj["rssi"] = uniqueDevices[i].rssi;
+    deviceObj["ipFixed"] = uniqueDevices[i].ipFixed;
+    deviceObj["hasMPU6050"] = uniqueDevices[i].hasMPU6050;
+    deviceObj["connected"] = uniqueDevices[i].connected;
+    
+    if (uniqueDevices[i].hasMPU6050) {
+      deviceObj["pitch"] = uniqueDevices[i].pitch;
+      deviceObj["roll"] = uniqueDevices[i].roll;
+      deviceObj["yaw"] = uniqueDevices[i].yaw;
+      deviceObj["relPitch"] = uniqueDevices[i].relPitch;
+      deviceObj["relRoll"] = uniqueDevices[i].relRoll;
+      deviceObj["relYaw"] = uniqueDevices[i].relYaw;
     }
   }
-  
-  // Затем добавляем остальные устройства (без MPU6050)
-  for (int i = 0; i < deviceCount; i++) {
-    if (!devices[i].hasMPU6050) {
-      bool ipExists = false;
-      for (int j = 0; j < uniqueCount; j++) {
-        if (uniqueIPs[j] == devices[i].ip) {
-          ipExists = true;
-          break;
-        }
-      }
-      
-      if (!ipExists) {
-        // Добавляем IP в список уникальных
-        uniqueIPs[uniqueCount++] = devices[i].ip;
-        
-        // Добавляем устройство в JSON
-        JsonObject deviceObj = devicesArray.createNestedObject();
-        deviceObj["ip"] = devices[i].ip;
-        deviceObj["mac"] = devices[i].mac;
-        deviceObj["hostname"] = devices[i].hostname;
-        deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
-        deviceObj["rssi"] = devices[i].rssi;
-        deviceObj["ipFixed"] = devices[i].ipFixed;
-        deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
-        deviceObj["connected"] = devices[i].connected;
-      }
-    }
-  }
-  
-  // Обновляем общее количество устройств для отображения
-  doc["totalDevices"] = uniqueCount;
   
   String json;
   serializeJson(doc, json);
