@@ -86,6 +86,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .sensor-row { display: flex; justify-content: space-between; margin-bottom: 1px; font-size: 10px; }
         .sensor-label { color: #6c757d; }
         .sensor-value { color: #e74c3c; font-weight: bold; }
+        .sensor-controls { display: flex; gap: 5px; margin-top: 5px; }
+        .sensor-btn { padding: 3px 8px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 9px; flex: 1; }
+        .sensor-btn.calibrate { background: #f39c12; }
+        .sensor-btn.reset { background: #e74c3c; }
         .controls { text-align: center; margin: 10px 0; }
         .btn { padding: 5px 10px; margin: 2px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 10px; }
         .btn-settings { background: #34495e; }
@@ -228,6 +232,51 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             }
         }
         
+        function calibrateSensor(ip) {
+            
+            fetch('/api/calibrate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'ip=' + encodeURIComponent(ip)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('Команда калибровки отправлена устройству');
+                } else {
+                    alert('Ошибка: ' + (data.message || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Ошибка отправки команды калибровки');
+            });
+        }
+        
+        function resetAngles(ip) {
+            fetch('/api/reset', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'ip=' + encodeURIComponent(ip)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('Команда сброса углов отправлена устройству');
+                } else {
+                    alert('Ошибка: ' + (data.message || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Ошибка отправки команды сброса');
+            });
+        }
+        
         function refreshData() {
             const btn = document.getElementById('refreshBtn');
             btn.innerHTML = '⏳ Scanning...';
@@ -310,6 +359,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         <div class="sensor-row">
                             <span class="sensor-label">Rel Yaw:</span>
                             <span class="sensor-value">${device.relYaw.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-controls">
+                            <button class="sensor-btn calibrate" onclick="calibrateSensor('${device.ip}')">Калибровка</button>
+                            <button class="sensor-btn reset" onclick="resetAngles('${device.ip}')">Reset Angles</button>
                         </div>
                         <div class="sensor-row" style="font-size: 8px; color: #999; margin-top: 3px;">
                             <span class="sensor-label">Last sensor update:</span>
@@ -817,12 +870,20 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           String pongMsg = "PONG";
           webSocket.sendTXT(num, pongMsg);
         }
-                else if (message.startsWith("DEVICE_CONNECTED:")) {
+        else if (message.startsWith("DEVICE_CONNECTED:")) {
           // Обработка подключения нового устройства
           String deviceName = message.substring(17);
           Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
           String welcomeDeviceMsg = "WELCOME:" + deviceName;
           webSocket.sendTXT(num, welcomeDeviceMsg);
+        }
+        else if (message == "CALIBRATION_COMPLETE") {
+          Serial.printf("[VR %u] Calibration completed\n", num);
+          // Можно добавить дополнительную логику при завершении калибровки
+        }
+        else if (message == "ANGLES_RESET") {
+          Serial.printf("[VR %u] Angles reset to zero\n", num);
+          // Можно добавить дополнительную логику при сбросе углов
         }
       }
       break;
@@ -950,6 +1011,74 @@ void handleApiDevices() {
   server.send(200, "application/json", json);
 }
 
+// API для калибровки датчика
+void handleApiCalibrate() {
+  if (server.method() == HTTP_POST) {
+    String ip = server.arg("ip");
+    Serial.printf("Calibration request for device: %s\n", ip.c_str());
+    
+    // Находим устройство по IP
+    int deviceIndex = findDeviceByIP(ip);
+    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
+      // Отправляем команду калибровки через WebSocket
+      bool commandSent = false;
+      for (int i = 0; i < webSocket.connectedClients(); i++) {
+        IPAddress clientIp = webSocket.remoteIP(i);
+        if (clientIp.toString() == ip) {
+          webSocket.sendTXT(i, "CALIBRATE_SENSOR");
+          commandSent = true;
+          Serial.printf("Calibration command sent to %s\n", ip.c_str());
+          break;
+        }
+      }
+      
+      if (commandSent) {
+        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Calibration command sent\"}");
+      } else {
+        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
+      }
+    } else {
+      server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для сброса углов
+void handleApiReset() {
+  if (server.method() == HTTP_POST) {
+    String ip = server.arg("ip");
+    Serial.printf("Reset angles request for device: %s\n", ip.c_str());
+    
+    // Находим устройство по IP
+    int deviceIndex = findDeviceByIP(ip);
+    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
+      // Отправляем команду сброса через WebSocket
+      bool commandSent = false;
+      for (int i = 0; i < webSocket.connectedClients(); i++) {
+        IPAddress clientIp = webSocket.remoteIP(i);
+        if (clientIp.toString() == ip) {
+          webSocket.sendTXT(i, "RESET_ANGLES");
+          commandSent = true;
+          Serial.printf("Reset angles command sent to %s\n", ip.c_str());
+          break;
+        }
+      }
+      
+      if (commandSent) {
+        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Reset command sent\"}");
+      } else {
+        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
+      }
+    } else {
+      server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
 // API для сохранения настроек
 void handleApiSettings() {
   if (server.method() == HTTP_POST) {
@@ -1003,6 +1132,8 @@ void setup() {
   // Настройка маршрутов сервера
   server.on("/", handleRoot);
   server.on("/api/devices", handleApiDevices);
+  server.on("/api/calibrate", HTTP_POST, handleApiCalibrate);
+  server.on("/api/reset", HTTP_POST, handleApiReset);
   server.on("/api/settings", HTTP_POST, handleApiSettings);
   
   // Запуск сервера
