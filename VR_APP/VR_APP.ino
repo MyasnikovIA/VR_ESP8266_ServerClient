@@ -11,7 +11,7 @@ const char* ap_password = "12345678";
 // Создание веб-сервера на порту 80
 ESP8266WebServer server(80);
 
-// WebSocket сервер на порту 81
+// WebSocket сервер на порту 81 для VR-клиентов
 WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Структура для хранения информации об устройстве
@@ -25,6 +25,11 @@ struct DeviceInfo {
   float pitch;
   float roll;
   float yaw;
+  float relPitch;
+  float relRoll;
+  float relYaw;
+  unsigned long lastUpdate;
+  bool connected;
 };
 
 // Структура для настроек сети
@@ -47,14 +52,14 @@ NetworkSettings networkSettings;
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
 
-// Упрощенная HTML страница
+// Упрощенная HTML страница (старый функционал)
 const char htmlPage[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Network Monitor</title>
+    <title>VR Tracking Server</title>
     <style>
         body { font-family: Arial; margin: 10px; background: #f0f0f0; }
         .container { max-width: 1000px; margin: 0 auto; background: white; padding: 15px; border-radius: 8px; }
@@ -63,14 +68,21 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .stat-card { background: #ecf0f1; padding: 8px; border-radius: 4px; text-align: center; min-width: 100px; margin: 3px; }
         .stat-number { font-size: 18px; font-weight: bold; color: #2c3e50; }
         .stat-label { color: #7f8c8d; font-size: 11px; }
-        .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; margin-bottom: 15px; }
-        .device-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: 8px; }
+        .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; margin-bottom: 15px; }
+        .device-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: 8px; transition: all 0.3s; }
+        .device-card.vr-device { border-left: 4px solid #e74c3c; background: #fff5f5; }
         .device-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
         .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; }
-        .device-status { background: #27ae60; color: white; padding: 2px 5px; border-radius: 6px; font-size: 9px; }
+        .device-status { padding: 2px 5px; border-radius: 6px; font-size: 9px; }
+        .status-online { background: #27ae60; color: white; }
+        .status-offline { background: #95a5a6; color: white; }
         .info-row { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 11px; }
         .info-label { color: #7f8c8d; }
         .info-value { color: #2c3e50; font-family: monospace; }
+        .sensor-data { background: #f8f9fa; padding: 5px; border-radius: 3px; margin-top: 5px; border: 1px solid #e9ecef; }
+        .sensor-row { display: flex; justify-content: space-between; margin-bottom: 1px; font-size: 10px; }
+        .sensor-label { color: #6c757d; }
+        .sensor-value { color: #e74c3c; font-weight: bold; }
         .controls { text-align: center; margin: 10px 0; }
         .btn { padding: 5px 10px; margin: 2px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 10px; }
         .btn-settings { background: #34495e; }
@@ -86,13 +98,14 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .form-input { width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box; font-size: 11px; }
         .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; }
         .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 8px; border-radius: 3px; margin-bottom: 10px; font-size: 11px; color: #856404; }
+        .vr-badge { background: #e74c3c; color: white; padding: 1px 4px; border-radius: 3px; font-size: 8px; margin-left: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1 style="margin:0;font-size:20px;">🖥️ Network Monitor</h1>
-            <p style="margin:5px 0 0 0;font-size:12px;">Real-time device monitoring</p>
+            <h1 style="margin:0;font-size:20px;">🎮 VR Tracking Server</h1>
+            <p style="margin:5px 0 0 0;font-size:12px;">Real-time MPU6050 device monitoring</p>
         </div>
         
         <div class="stats">
@@ -105,8 +118,12 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                 <div class="stat-label">Online Now</div>
             </div>
             <div class="stat-card">
+                <div class="stat-number" id="vrDevices">0</div>
+                <div class="stat-label">VR Headsets</div>
+            </div>
+            <div class="stat-card">
                 <div class="stat-number" id="espIp">-</div>
-                <div class="stat-label">ESP IP</div>
+                <div class="stat-label">Server IP</div>
             </div>
         </div>
         
@@ -117,7 +134,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         
         <div class="controls">
             <button class="btn" onclick="refreshData()" id="refreshBtn">🔄 Refresh</button>
-            <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">Auto (10s)</button>
+            <button class="btn" onclick="startAutoRefresh()" id="autoRefreshBtn">Auto (5s)</button>
             <button class="btn btn-settings" onclick="showSettings()">⚙️ Settings</button>
         </div>
         
@@ -181,6 +198,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         function updateDisplay(data) {
             document.getElementById('totalDevices').textContent = data.totalDevices;
             document.getElementById('onlineDevices').textContent = data.onlineDevices;
+            document.getElementById('vrDevices').textContent = data.vrDevices;
             document.getElementById('espIp').textContent = data.espIp;
             document.getElementById('updateTime').textContent = new Date().toLocaleTimeString();
             
@@ -192,12 +210,15 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             }
             
             container.innerHTML = data.devices.map(device => `
-                <div class="device-card">
+                <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''}">
                     <div class="device-header">
                         <div class="device-name">
                             ${getDeviceIcon(device)} ${device.displayName}
+                            ${device.hasMPU6050 ? '<span class="vr-badge">VR</span>' : ''}
                         </div>
-                        <div class="device-status">Online</div>
+                        <div class="device-status ${device.connected ? 'status-online' : 'status-offline'}">
+                            ${device.connected ? 'Online' : 'Offline'}
+                        </div>
                     </div>
                     <div class="info-row">
                         <span class="info-label">IP:</span>
@@ -211,11 +232,40 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         <span class="info-label">Signal:</span>
                         <span class="info-value">${device.rssi} dBm</span>
                     </div>
+                    ${device.hasMPU6050 ? `
+                    <div class="sensor-data">
+                        <div class="sensor-row">
+                            <span class="sensor-label">Pitch:</span>
+                            <span class="sensor-value">${device.pitch.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row">
+                            <span class="sensor-label">Roll:</span>
+                            <span class="sensor-value">${device.roll.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row">
+                            <span class="sensor-label">Yaw:</span>
+                            <span class="sensor-value">${device.yaw.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row">
+                            <span class="sensor-label">Rel Pitch:</span>
+                            <span class="sensor-value">${device.relPitch.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row">
+                            <span class="sensor-label">Rel Roll:</span>
+                            <span class="sensor-value">${device.relRoll.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row">
+                            <span class="sensor-label">Rel Yaw:</span>
+                            <span class="sensor-value">${device.relYaw.toFixed(1)}°</span>
+                        </div>
+                    </div>
+                    ` : ''}
                 </div>
             `).join('');
         }
         
         function getDeviceIcon(device) {
+            if (device.hasMPU6050) return '🎮';
             const name = (device.displayName || '').toLowerCase();
             if (name.includes('iphone') || name.includes('ipad')) return '📱';
             if (name.includes('android')) return '📱';
@@ -291,9 +341,9 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
                 autoRefreshInterval = null;
-                btn.innerHTML = 'Auto (10s)';
+                btn.innerHTML = 'Auto (5s)';
             } else {
-                autoRefreshInterval = setInterval(refreshData, 10000);
+                autoRefreshInterval = setInterval(refreshData, 5000);
                 btn.innerHTML = 'Stop';
                 refreshData();
             }
@@ -311,6 +361,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         // Инициализация при загрузке страницы
         document.addEventListener('DOMContentLoaded', function() {
             refreshData();
+            startAutoRefresh();
         });
     </script>
 </body>
@@ -321,6 +372,16 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 int findDeviceByMAC(const String& mac) {
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].mac == mac) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для поиска устройства по IP
+int findDeviceByIP(const String& ip) {
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].ip == ip) {
       return i;
     }
   }
@@ -347,6 +408,11 @@ void addDevice(const String& ip, const String& mac, const String& hostname, int 
       devices[deviceCount].pitch = 0;
       devices[deviceCount].roll = 0;
       devices[deviceCount].yaw = 0;
+      devices[deviceCount].relPitch = 0;
+      devices[deviceCount].relRoll = 0;
+      devices[deviceCount].relYaw = 0;
+      devices[deviceCount].lastUpdate = 0;
+      devices[deviceCount].connected = true;
       deviceCount++;
       
       Serial.printf("New device: %s (%s) - %s - RSSI: %d\n", 
@@ -355,8 +421,55 @@ void addDevice(const String& ip, const String& mac, const String& hostname, int 
   } else {
     devices[index].rssi = rssi;
     devices[index].ip = ip;
+    devices[index].connected = true;
     if (hostname.length() > 0) {
       devices[index].hostname = hostname;
+    }
+  }
+}
+
+// Функция для обновления данных MPU6050 от VR-клиента
+void updateVRDeviceData(const String& ip, const String& deviceName, 
+                       float pitch, float roll, float yaw,
+                       float relPitch, float relRoll, float relYaw) {
+  int index = findDeviceByIP(ip);
+  
+  if (index == -1) {
+    // Создаем новое устройство если не найдено
+    if (deviceCount < MAX_DEVICES) {
+      devices[deviceCount].ip = ip;
+      devices[deviceCount].mac = "VR:" + deviceName;
+      devices[deviceCount].hostname = deviceName;
+      devices[deviceCount].rssi = -50;
+      devices[deviceCount].ipFixed = false;
+      devices[deviceCount].hasMPU6050 = true;
+      devices[deviceCount].pitch = pitch;
+      devices[deviceCount].roll = roll;
+      devices[deviceCount].yaw = yaw;
+      devices[deviceCount].relPitch = relPitch;
+      devices[deviceCount].relRoll = relRoll;
+      devices[deviceCount].relYaw = relYaw;
+      devices[deviceCount].lastUpdate = millis();
+      devices[deviceCount].connected = true;
+      deviceCount++;
+      
+      Serial.printf("New VR device: %s (%s) - Pitch: %.1f, Roll: %.1f, Yaw: %.1f\n", 
+                   deviceName.c_str(), ip.c_str(), pitch, roll, yaw);
+    }
+  } else {
+    // Обновляем существующее устройство
+    devices[index].hasMPU6050 = true;
+    devices[index].pitch = pitch;
+    devices[index].roll = roll;
+    devices[index].yaw = yaw;
+    devices[index].relPitch = relPitch;
+    devices[index].relRoll = relRoll;
+    devices[index].relYaw = relYaw;
+    devices[index].lastUpdate = millis();
+    devices[index].connected = true;
+    
+    if (deviceName.length() > 0) {
+      devices[index].hostname = deviceName;
     }
   }
 }
@@ -365,6 +478,11 @@ void addDevice(const String& ip, const String& mac, const String& hostname, int 
 void scanNetwork() {
   struct station_info *station = wifi_softap_get_station_info();
   int onlineCount = 0;
+  
+  // Помечаем все устройства как отключенные
+  for (int i = 0; i < deviceCount; i++) {
+    devices[i].connected = false;
+  }
   
   while (station != NULL) {
     String ip = IPAddress(station->ip).toString();
@@ -386,6 +504,15 @@ void scanNetwork() {
   }
   
   wifi_softap_free_station_info();
+  
+  // Помечаем VR-устройства как онлайн если они обновлялись недавно
+  unsigned long currentTime = millis();
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].hasMPU6050 && (currentTime - devices[i].lastUpdate) < 30000) {
+      devices[i].connected = true;
+      onlineCount++;
+    }
+  }
   
   Serial.printf("Scan complete. Found %d online devices\n", onlineCount);
   lastScanTime = millis();
@@ -498,24 +625,93 @@ void setupWiFiAP() {
   Serial.print("IP: "); Serial.println(WiFi.softAPIP());
 }
 
-// Обработчик WebSocket событий
+// Обработчик WebSocket событий для VR-клиентов
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.printf("[%u] Disconnected!\n", num);
+      Serial.printf("[%u] VR Client Disconnected!\n", num);
       break;
       
     case WStype_CONNECTED:
       {
         IPAddress ip = webSocket.remoteIP(num);
-        Serial.printf("[%u] Connected from %d.%d.%d.%d\n", num, ip[0], ip[1], ip[2], ip[3]);
+        Serial.printf("[%u] VR Client Connected from %s\n", num, ip.toString().c_str());
+        
+        // Отправляем приветственное сообщение
+        String welcomeMsg = "VR_SERVER:CONNECTED";
+        webSocket.sendTXT(num, welcomeMsg);
       }
       break;
       
     case WStype_TEXT:
       {
         String message = String((char*)payload);
-        Serial.printf("[%u] Received: %s\n", num, message);
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[%u] Received from VR Client: %s\n", num, message.c_str());
+        
+        // Обработка данных от VR-клиента
+        if (message.startsWith("DEVICE:")) {
+          // Парсим данные MPU6050
+          String deviceName = "";
+          float pitch = 0, roll = 0, yaw = 0;
+          float relPitch = 0, relRoll = 0, relYaw = 0;
+          
+          // Разбираем сообщение на компоненты
+          int start = 7; // После "DEVICE:"
+          int end = message.indexOf(',', start);
+          if (end != -1) {
+            deviceName = message.substring(start, end);
+          }
+          
+          // Ищем значения углов
+          int pitchIndex = message.indexOf("PITCH:");
+          if (pitchIndex != -1) {
+            pitch = message.substring(pitchIndex + 6, message.indexOf(',', pitchIndex)).toFloat();
+          }
+          
+          int rollIndex = message.indexOf("ROLL:");
+          if (rollIndex != -1) {
+            roll = message.substring(rollIndex + 5, message.indexOf(',', rollIndex)).toFloat();
+          }
+          
+          int yawIndex = message.indexOf("YAW:");
+          if (yawIndex != -1) {
+            yaw = message.substring(yawIndex + 4, message.indexOf(',', yawIndex)).toFloat();
+          }
+          
+          int relPitchIndex = message.indexOf("REL_PITCH:");
+          if (relPitchIndex != -1) {
+            relPitch = message.substring(relPitchIndex + 10, message.indexOf(',', relPitchIndex)).toFloat();
+          }
+          
+          int relRollIndex = message.indexOf("REL_ROLL:");
+          if (relRollIndex != -1) {
+            relRoll = message.substring(relRollIndex + 9, message.indexOf(',', relRollIndex)).toFloat();
+          }
+          
+          int relYawIndex = message.indexOf("REL_YAW:");
+          if (relYawIndex != -1) {
+            relYaw = message.substring(relYawIndex + 8, message.indexOf(',', relYawIndex)).toFloat();
+          }
+          
+          // Обновляем данные устройства
+          updateVRDeviceData(ip.toString(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
+          
+          // Отправляем подтверждение
+          String ackMsg = "DATA_RECEIVED";
+          webSocket.sendTXT(num, ackMsg);
+        }
+        else if (message == "PING") {
+          String pongMsg = "PONG";
+          webSocket.sendTXT(num, pongMsg);
+        }
+        else if (message.startsWith("DEVICE_CONNECTED:")) {
+          // Обработка подключения нового устройства
+          String deviceName = message.substring(17);
+          Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
+          String welcomeDeviceMsg = "WELCOME:" + deviceName;
+          webSocket.sendTXT(num, welcomeDeviceMsg);
+        }
       }
       break;
       
@@ -535,9 +731,23 @@ void handleRoot() {
 void handleApiDevices() {
   Serial.println("API devices requested");
   
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(2048);
   doc["totalDevices"] = deviceCount;
-  doc["onlineDevices"] = deviceCount;
+  
+  // Подсчет онлайн устройств и VR-устройств
+  int onlineCount = 0;
+  int vrCount = 0;
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].connected) {
+      onlineCount++;
+    }
+    if (devices[i].hasMPU6050) {
+      vrCount++;
+    }
+  }
+  
+  doc["onlineDevices"] = onlineCount;
+  doc["vrDevices"] = vrCount;
   doc["espIp"] = WiFi.softAPIP().toString();
   
   JsonArray devicesArray = doc.createNestedArray("devices");
@@ -550,6 +760,17 @@ void handleApiDevices() {
     deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
     deviceObj["rssi"] = devices[i].rssi;
     deviceObj["ipFixed"] = devices[i].ipFixed;
+    deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
+    deviceObj["connected"] = devices[i].connected;
+    
+    if (devices[i].hasMPU6050) {
+      deviceObj["pitch"] = devices[i].pitch;
+      deviceObj["roll"] = devices[i].roll;
+      deviceObj["yaw"] = devices[i].yaw;
+      deviceObj["relPitch"] = devices[i].relPitch;
+      deviceObj["relRoll"] = devices[i].relRoll;
+      deviceObj["relYaw"] = devices[i].relYaw;
+    }
   }
   
   String json;
@@ -596,7 +817,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\nStarting ESP8266 Network Monitor...");
+  Serial.println("\nStarting VR Tracking Server...");
   
   // Очистка EEPROM при первом запуске (раскомментировать для очистки)
   // clearEEPROM();
@@ -615,12 +836,13 @@ void setup() {
   // Запуск сервера
   server.begin();
   
-  // Запуск WebSocket сервера
+  // Запуск WebSocket сервера для VR-клиентов
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
   
   Serial.println("HTTP server started on port 80");
-  Serial.println("WebSocket server started on port 81");
+  Serial.println("WebSocket server started on port 81 for VR clients");
+  Serial.println("Ready to receive MPU6050 data from VR headsets!");
   
   // Первое сканирование
   scanNetwork();

@@ -9,12 +9,11 @@
 
 Adafruit_MPU6050 mpu;
 
-// WiFi credentials
-const char* ssid = "ESP8266_Network_Monitor";
-const char* password = "12345678";
+// Настройки WiFi для подключения к точке доступа VR_APP
+const char* ssid = "ESP8266_Network_Monitor";  // SSID точки доступа VR_APP
+const char* password = "12345678";              // Пароль точки доступа VR_APP
 
-// Multi-user socket server settings
-String SOCKET_SERVER_HOST = "192.168.4.1";
+// Настройки сокет-сервера (VR_APP)
 const uint16_t SOCKET_SERVER_PORT = 81;
 bool socketServerConnected = false;
 unsigned long lastSocketReconnectAttempt = 0;
@@ -58,6 +57,12 @@ const float CHANGE_THRESHOLD = 1.0;
 unsigned long lastSocketSend = 0;
 const unsigned long SOCKET_SEND_INTERVAL = 100;
 
+// Функция для получения IP адреса основного шлюза
+String getGatewayIP() {
+  IPAddress gateway = WiFi.gatewayIP();
+  return gateway.toString();
+}
+
 // Функция для проверки валидности имени устройства
 bool isValidDeviceName(const String& name) {
   if (name.length() == 0 || name.length() > MAX_DEVICE_NAME_LENGTH - 1) {
@@ -74,11 +79,6 @@ bool isValidDeviceName(const String& name) {
   }
   
   return true;
-}
-// Функция для получения IP адреса основного шлюза
-String getGatewayIP() {
-  IPAddress gateway = WiFi.gatewayIP();
-  return gateway.toString();
 }
 
 // Функция для очистки имени устройства
@@ -402,7 +402,7 @@ void calibrateSensor() {
   Serial.print(" Z: "); Serial.println(gyroOffsetZ, 6);
 }
 
-// Отправка данных на многопользовательский сокет-сервер
+// Отправка данных на многопользовательский сокет-сервер (VR_APP)
 void sendDataToSocketServer() {
   if (!socketServerConnected) return;
   
@@ -492,38 +492,67 @@ bool dataChanged() {
           abs(yaw - lastSentYaw) >= CHANGE_THRESHOLD);
 }
 
-// Обработчик событий сокет-клиента (подключение к многопользовательскому серверу)
+// Обработчик событий сокет-клиента (подключение к многопользовательскому серверу VR_APP)
 void socketClientEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.println("Disconnected from multi-user socket server");
+      Serial.println("Disconnected from VR_APP socket server");
       socketServerConnected = false;
       break;
       
     case WStype_CONNECTED:
       {
-        Serial.println("Connected to multi-user socket server!");
+        Serial.println("Connected to VR_APP socket server!");
         socketServerConnected = true;
         
         // Отправляем информацию об устройстве при подключении
         String connectMsg = "DEVICE_CONNECTED:" + deviceName + ",IP:" + WiFi.localIP().toString();
         socketClient.sendTXT(connectMsg);
         
-        Serial.println("Sent device info to socket server: " + connectMsg);
+        Serial.println("Sent device info to VR_APP server: " + connectMsg);
+        
+        // Отладочная информация о соединении
+        Serial.print("Connected to gateway: ");
+        Serial.print(WiFi.gatewayIP().toString());
+        Serial.print(":");
+        Serial.println(SOCKET_SERVER_PORT);
       }
       break;
       
     case WStype_TEXT:
       {
         String message = String((char*)payload);
-        Serial.println("Received from socket server: " + message);
+        Serial.println("Received from VR_APP server: " + message);
         
-        // Обработка команд от сокет-сервера (если нужно)
+        // Обработка команд от сокет-сервера
         if (message == "PING") {
-          socketClient.sendTXT("PONG");
+          String pongMsg = "PONG";
+          socketClient.sendTXT(pongMsg);
         }
         else if (message == "GET_STATUS") {
           sendDataToSocketServer();
+        }
+        // Пересылаем команды от сервера на локальный WebSocket
+        else if (message == "RECALIBRATE") {
+          calibrated = false;
+          calibrateSensor();
+          String calMessage = "RECALIBRATION_COMPLETE";
+          webSocket.broadcastTXT(calMessage);
+        }
+        else if (message == "RESET_ANGLES" || message == "RA") {
+          resetAllAngles();
+          String resetMessage = "ANGLES_RESET";
+          webSocket.broadcastTXT(resetMessage);
+        }
+        else if (message == "SET_ZERO" || message == "SZ") {
+          setZeroPoint();
+          String zeroMsg = "ZERO_POINT_SET";
+          webSocket.broadcastTXT(zeroMsg);
+        }
+        else if (message == "RESET_ZERO" || message == "RZ") {
+          resetZeroPoint();
+          String resetZeroMsg = "ZERO_POINT_RESET";
+          webSocket.broadcastTXT(resetZeroMsg);
         }
       }
       break;
@@ -583,11 +612,13 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         }
         else if (message == "SET_ZERO" || message == "SZ") {
           setZeroPoint();
-          webSocket.broadcastTXT("ZERO_POINT_SET");
+          String zeroMsg = "ZERO_POINT_SET";
+          webSocket.broadcastTXT(zeroMsg);
         }
         else if (message == "RESET_ZERO" || message == "RZ") {
           resetZeroPoint();
-          webSocket.broadcastTXT("ZERO_POINT_RESET");
+          String resetZeroMsg = "ZERO_POINT_RESET";
+          webSocket.broadcastTXT(resetZeroMsg);
         }
         else if (message == "GET_DEVICE_INFO") {
           String deviceInfo = "DEVICE_INFO:NAME:" + deviceName + 
@@ -671,16 +702,17 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
-// Функция для подключения к многопользовательскому сокет-серверу
-// В функции connectToSocketServer():
+// Функция для подключения к многопользовательскому сокет-серверу VR_APP
 void connectToSocketServer() {
-  Serial.println("Attempting to connect to multi-user socket server...");
-  SOCKET_SERVER_HOST = getGatewayIP(); // Теперь это будет работать
-  Serial.print("Host: "); Serial.print(SOCKET_SERVER_HOST);
-  Serial.print(" Port: "); Serial.println(SOCKET_SERVER_PORT);
+  Serial.println("Attempting to connect to VR_APP socket server...");
+  
+  // Получаем IP основного шлюза (сервера VR_APP)
+  String gatewayIP = getGatewayIP();
+  Serial.print("Gateway IP: "); Serial.println(gatewayIP);
+  Serial.print("Port: "); Serial.println(SOCKET_SERVER_PORT);
   
   // Настраиваем клиент WebSocket
-  socketClient.begin(SOCKET_SERVER_HOST.c_str(), SOCKET_SERVER_PORT, "/");
+  socketClient.begin(gatewayIP.c_str(), SOCKET_SERVER_PORT, "/");
   socketClient.onEvent(socketClientEvent);
   socketClient.setReconnectInterval(SOCKET_RECONNECT_INTERVAL);
   
@@ -855,14 +887,14 @@ void handleRoot() {
         <h1>MPU6050 Sensor Data - )rawliteral" + deviceName + R"rawliteral( 
             <span class="unlimited-badge">UNLIMITED ANGLES</span>
             <span class="eeprom-badge">EEPROM</span>
-            <span class="socket-badge">MULTI-USER</span>
+            <span class="socket-badge">VR_APP CLIENT</span>
         </h1>
         
         <div class="device-info">
             <strong>Device:</strong> <span id="deviceName">)rawliteral" + deviceName + R"rawliteral(</span> | 
             <strong>IP:</strong> <span id="deviceIP">)</span> | 
             <strong>Status:</strong> <span id="deviceStatus">Connected</span> |
-            <strong>Socket Server:</strong> <span id="socketServerStatus" style="color: #dc3545;">Disconnected</span>
+            <strong>VR_APP Server:</strong> <span id="socketServerStatus" style="color: #dc3545;">Disconnected</span>
         </div>
         
         <div class="status" id="status">Disconnected</div>
@@ -1171,7 +1203,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000); // Даем время для инициализации Serial
   
-  Serial.println("\n\nStarting MPU6050 Sensor Server...");
+  Serial.println("\n\nStarting MPU6050 Sensor Client...");
   
   // Инициализация EEPROM и загрузка имени устройства
   deviceName = loadDeviceNameFromEEPROM();
@@ -1179,7 +1211,10 @@ void setup() {
   // Устанавливаем имя хоста
   WiFi.hostname(deviceName.c_str());
   
-  Serial.println("Connecting to WiFi...");
+  // Подключаемся к WiFi точке доступа VR_APP
+  Serial.println("Connecting to VR_APP WiFi...");
+  Serial.print("SSID: "); Serial.println(ssid);
+  
   WiFi.begin(ssid, password);
   
   int attempts = 0;
@@ -1190,15 +1225,21 @@ void setup() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+    Serial.println("\nConnected to VR_APP! IP: " + WiFi.localIP().toString());
+    Serial.println("Gateway IP: " + WiFi.gatewayIP().toString());
+    Serial.println("Subnet Mask: " + WiFi.subnetMask().toString());
     Serial.println("Device Name: " + deviceName);
     Serial.println("UNLIMITED ANGLES: All relative angles can exceed 360°");
     Serial.println("EEPROM: Device name storage enabled");
     
-    // Подключаемся к многопользовательскому сокет-серверу
+    // Подключаемся к многопользовательскому сокет-серверу VR_APP
     connectToSocketServer();
   } else {
-    Serial.println("\nFailed to connect to WiFi!");
+    Serial.println("\nFailed to connect to VR_APP WiFi!");
+    Serial.println("Please check:");
+    Serial.println("1. VR_APP is running and creating access point");
+    Serial.println("2. SSID and password are correct");
+    Serial.println("3. ESP8266 is in range");
     return;
   }
   
@@ -1243,7 +1284,6 @@ void setup() {
   
   Serial.println("HTTP server started on port 80");
   Serial.println("WebSocket server started on port 81");
-  Serial.println("Multi-user socket client configured for: " + String(SOCKET_SERVER_HOST) + ":" + String(SOCKET_SERVER_PORT));
   Serial.println("All relative angles (Pitch, Roll, Yaw) now support unlimited rotation beyond 360°");
   Serial.println("Device name management commands available:");
   Serial.println("  SET_DEVICE_NAME:NewName - Change device name");
@@ -1261,9 +1301,9 @@ void loop() {
   webSocket.loop();
   socketClient.loop(); // Обработка сокет-клиента
   
-  // Попытка переподключения к сокет-серверу, если соединение потеряно
+  // Попытка переподключения к сокет-серверу VR_APP, если соединение потеряно
   if (!socketServerConnected && millis() - lastSocketReconnectAttempt > SOCKET_RECONNECT_INTERVAL) {
-    Serial.println("Attempting to reconnect to socket server...");
+    Serial.println("Attempting to reconnect to VR_APP socket server...");
     connectToSocketServer();
     lastSocketReconnectAttempt = millis();
   }
@@ -1311,7 +1351,7 @@ void loop() {
     }
   }
   
-  // Отправка данных на многопользовательский сокет-сервер
+  // Отправка данных на многопользовательский сокет-сервер VR_APP
   if (socketServerConnected && (currentTime - lastSocketSend >= SOCKET_SEND_INTERVAL)) {
     sendDataToSocketServer();
     lastSocketSend = currentTime;
