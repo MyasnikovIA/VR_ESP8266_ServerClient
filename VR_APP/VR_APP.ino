@@ -14,6 +14,9 @@ ESP8266WebServer server(80);
 // WebSocket сервер на порту 81 для VR-клиентов
 WebSocketsServer webSocket = WebSocketsServer(81);
 
+// WebSocket сервер на порту 82 для веб-клиентов (обновление данных в реальном времени)
+WebSocketsServer webSocketWeb = WebSocketsServer(82);
+
 // Структура для хранения информации об устройстве
 struct DeviceInfo {
   String ip;
@@ -174,6 +177,56 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 
     <script>
         let autoRefreshInterval = null;
+        let webSocketClient = null;
+        
+        function connectWebSocket() {
+            const serverIp = document.getElementById('espIp').textContent;
+            if (serverIp === '-') return;
+            
+            webSocketClient = new WebSocket(`ws://${serverIp}:82`);
+            
+            webSocketClient.onopen = function() {
+                console.log('WebSocket connected for real-time updates');
+            };
+            
+            webSocketClient.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.type === 'sensor_update') {
+                    updateSensorData(data.device);
+                }
+            };
+            
+            webSocketClient.onclose = function() {
+                console.log('WebSocket disconnected, reconnecting...');
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            webSocketClient.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        function updateSensorData(deviceData) {
+            const deviceCard = document.querySelector(`[data-ip="${deviceData.ip}"]`);
+            if (deviceCard && deviceData.hasMPU6050) {
+                // Находим все элементы сенсоров
+                const sensorValues = deviceCard.querySelectorAll('.sensor-value');
+                if (sensorValues.length >= 6) {
+                    sensorValues[0].textContent = deviceData.pitch.toFixed(1) + '°';
+                    sensorValues[1].textContent = deviceData.roll.toFixed(1) + '°';
+                    sensorValues[2].textContent = deviceData.yaw.toFixed(1) + '°';
+                    sensorValues[3].textContent = deviceData.relPitch.toFixed(1) + '°';
+                    sensorValues[4].textContent = deviceData.relRoll.toFixed(1) + '°';
+                    sensorValues[5].textContent = deviceData.relYaw.toFixed(1) + '°';
+                }
+                
+                // Обновляем время последнего обновления
+                const updateTime = deviceCard.querySelector('.last-sensor-update');
+                if (updateTime) {
+                    updateTime.textContent = new Date().toLocaleTimeString();
+                }
+            }
+        }
         
         function refreshData() {
             const btn = document.getElementById('refreshBtn');
@@ -210,7 +263,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             }
             
             container.innerHTML = data.devices.map(device => `
-                <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''}">
+                <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''}" data-ip="${device.ip}">
                     <div class="device-header">
                         <div class="device-name">
                             ${getDeviceIcon(device)} ${device.displayName}
@@ -257,6 +310,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         <div class="sensor-row">
                             <span class="sensor-label">Rel Yaw:</span>
                             <span class="sensor-value">${device.relYaw.toFixed(1)}°</span>
+                        </div>
+                        <div class="sensor-row" style="font-size: 8px; color: #999; margin-top: 3px;">
+                            <span class="sensor-label">Last sensor update:</span>
+                            <span class="last-sensor-update">${new Date().toLocaleTimeString()}</span>
                         </div>
                     </div>
                     ` : ''}
@@ -362,6 +419,8 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         document.addEventListener('DOMContentLoaded', function() {
             refreshData();
             startAutoRefresh();
+            // Подключаем WebSocket для реального обновления данных
+            setTimeout(connectWebSocket, 1000);
         });
     </script>
 </body>
@@ -471,6 +530,26 @@ void updateVRDeviceData(const String& ip, const String& deviceName,
     if (deviceName.length() > 0) {
       devices[index].hostname = deviceName;
     }
+    
+    // Отправляем обновление через WebSocket всем веб-клиентам
+    DynamicJsonDocument doc(512);
+    doc["type"] = "sensor_update";
+    JsonObject deviceObj = doc.createNestedObject("device");
+    deviceObj["ip"] = devices[index].ip;
+    deviceObj["hasMPU6050"] = devices[index].hasMPU6050;
+    deviceObj["pitch"] = devices[index].pitch;
+    deviceObj["roll"] = devices[index].roll;
+    deviceObj["yaw"] = devices[index].yaw;
+    deviceObj["relPitch"] = devices[index].relPitch;
+    deviceObj["relRoll"] = devices[index].relRoll;
+    deviceObj["relYaw"] = devices[index].relYaw;
+    
+    String json;
+    serializeJson(doc, json);
+    webSocketWeb.broadcastTXT(json);
+    
+    Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", 
+                 ip.c_str(), pitch, roll, yaw);
   }
 }
 
@@ -601,6 +680,145 @@ void clearEEPROM() {
   Serial.println("EEPROM cleared successfully");
 }
 
+// Обработчик WebSocket событий для веб-клиентов
+void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[WEB %u] Web Client Disconnected!\n", num);
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocketWeb.remoteIP(num);
+        Serial.printf("[WEB %u] Web Client Connected from %s\n", num, ip.toString().c_str());
+        
+        // Отправляем приветственное сообщение
+        String welcomeMsg = "{\"type\":\"connected\",\"message\":\"Real-time updates enabled\"}";
+        webSocketWeb.sendTXT(num, welcomeMsg);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        Serial.printf("[WEB %u] Received: %s\n", num, message.c_str());
+        
+        // Обработка команд от веб-клиентов
+        if (message == "get_devices") {
+          // Можно добавить отправку текущего состояния устройств
+        }
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.printf("[WEB %u] WebSocket error\n", num);
+      break;
+  }
+}
+
+// Функция для парсинга данных MPU6050 из строки
+bool parseMPU6050Data(const String& message, String& deviceName, 
+                     float& pitch, float& roll, float& yaw,
+                     float& relPitch, float& relRoll, float& relYaw) {
+  // Пример формата: "DEVICE:VR-Head-Hom-001,PITCH:13.3,ROLL:5.7,YAW:-9.7,REL_PITCH:13.30,REL_ROLL:5.68,REL_YAW:-9.70,ACC_PITCH:13.30,ACC_ROLL:5.68,ACC_YAW:-9.70,ZERO_SET:false,TIMESTAMP:237540"
+  
+  if (!message.startsWith("DEVICE:")) {
+    return false;
+  }
+  
+  // Разбиваем сообщение на части
+  int startPos = 7; // После "DEVICE:"
+  int endPos = message.indexOf(',', startPos);
+  if (endPos == -1) return false;
+  
+  deviceName = message.substring(startPos, endPos);
+  
+  // Парсим основные значения
+  pitch = extractValue(message, "PITCH:");
+  roll = extractValue(message, "ROLL:");
+  yaw = extractValue(message, "YAW:");
+  relPitch = extractValue(message, "REL_PITCH:");
+  relRoll = extractValue(message, "REL_ROLL:");
+  relYaw = extractValue(message, "REL_YAW:");
+  
+  return true;
+}
+
+// Вспомогательная функция для извлечения значения из строки
+float extractValue(const String& message, const String& key) {
+  int keyPos = message.indexOf(key);
+  if (keyPos == -1) return 0.0;
+  
+  int valueStart = keyPos + key.length();
+  int valueEnd = message.indexOf(',', valueStart);
+  if (valueEnd == -1) valueEnd = message.length();
+  
+  String valueStr = message.substring(valueStart, valueEnd);
+  return valueStr.toFloat();
+}
+
+// Обработчик WebSocket событий для VR-клиентов
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[VR %u] VR Client Disconnected!\n", num);
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[VR %u] VR Client Connected from %s\n", num, ip.toString().c_str());
+        
+        // Отправляем приветственное сообщение
+        String welcomeMsg = "VR_SERVER:CONNECTED";
+        webSocket.sendTXT(num, welcomeMsg);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[VR %u] Received from VR Client: %s\n", num, message.c_str());
+        
+        // Обработка данных от VR-клиента
+        if (message.startsWith("DEVICE:")) {
+          String deviceName = "";
+          float pitch = 0, roll = 0, yaw = 0;
+          float relPitch = 0, relRoll = 0, relYaw = 0;
+          
+          // Парсим данные MPU6050
+          if (parseMPU6050Data(message, deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw)) {
+            // Обновляем данные устройства
+            updateVRDeviceData(ip.toString(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
+            
+            // Отправляем подтверждение
+            String ackMsg = "DATA_RECEIVED";
+            webSocket.sendTXT(num, ackMsg);
+          } else {
+            Serial.println("Error parsing MPU6050 data");
+          }
+        }
+        else if (message == "PING") {
+          String pongMsg = "PONG";
+          webSocket.sendTXT(num, pongMsg);
+        }
+        else if (message.startsWith("DEVICE_CONNECTED:")) {
+          // Обработка подключения нового устройства
+          String deviceName = message.substring(17);
+          Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
+          String welcomeDeviceMsg = "WELCOME:" + deviceName;
+          webSocket.sendTXT(num, welcomeDeviceMsg);
+        }
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.printf("[VR %u] WebSocket error\n", num);
+      break;
+  }
+}
+
 // Настройка WiFi в режиме точки доступа
 void setupWiFiAP() {
   Serial.println("Setting up Access Point...");
@@ -625,107 +843,12 @@ void setupWiFiAP() {
   Serial.print("IP: "); Serial.println(WiFi.softAPIP());
 }
 
-// Обработчик WebSocket событий для VR-клиентов
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("[%u] VR Client Disconnected!\n", num);
-      break;
-      
-    case WStype_CONNECTED:
-      {
-        IPAddress ip = webSocket.remoteIP(num);
-        Serial.printf("[%u] VR Client Connected from %s\n", num, ip.toString().c_str());
-        
-        // Отправляем приветственное сообщение
-        String welcomeMsg = "VR_SERVER:CONNECTED";
-        webSocket.sendTXT(num, welcomeMsg);
-      }
-      break;
-      
-    case WStype_TEXT:
-      {
-        String message = String((char*)payload);
-        IPAddress ip = webSocket.remoteIP(num);
-        Serial.printf("[%u] Received from VR Client: %s\n", num, message.c_str());
-        
-        // Обработка данных от VR-клиента
-        if (message.startsWith("DEVICE:")) {
-          // Парсим данные MPU6050
-          String deviceName = "";
-          float pitch = 0, roll = 0, yaw = 0;
-          float relPitch = 0, relRoll = 0, relYaw = 0;
-          
-          // Разбираем сообщение на компоненты
-          int start = 7; // После "DEVICE:"
-          int end = message.indexOf(',', start);
-          if (end != -1) {
-            deviceName = message.substring(start, end);
-          }
-          
-          // Ищем значения углов
-          int pitchIndex = message.indexOf("PITCH:");
-          if (pitchIndex != -1) {
-            pitch = message.substring(pitchIndex + 6, message.indexOf(',', pitchIndex)).toFloat();
-          }
-          
-          int rollIndex = message.indexOf("ROLL:");
-          if (rollIndex != -1) {
-            roll = message.substring(rollIndex + 5, message.indexOf(',', rollIndex)).toFloat();
-          }
-          
-          int yawIndex = message.indexOf("YAW:");
-          if (yawIndex != -1) {
-            yaw = message.substring(yawIndex + 4, message.indexOf(',', yawIndex)).toFloat();
-          }
-          
-          int relPitchIndex = message.indexOf("REL_PITCH:");
-          if (relPitchIndex != -1) {
-            relPitch = message.substring(relPitchIndex + 10, message.indexOf(',', relPitchIndex)).toFloat();
-          }
-          
-          int relRollIndex = message.indexOf("REL_ROLL:");
-          if (relRollIndex != -1) {
-            relRoll = message.substring(relRollIndex + 9, message.indexOf(',', relRollIndex)).toFloat();
-          }
-          
-          int relYawIndex = message.indexOf("REL_YAW:");
-          if (relYawIndex != -1) {
-            relYaw = message.substring(relYawIndex + 8, message.indexOf(',', relYawIndex)).toFloat();
-          }
-          
-          // Обновляем данные устройства
-          updateVRDeviceData(ip.toString(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
-          
-          // Отправляем подтверждение
-          String ackMsg = "DATA_RECEIVED";
-          webSocket.sendTXT(num, ackMsg);
-        }
-        else if (message == "PING") {
-          String pongMsg = "PONG";
-          webSocket.sendTXT(num, pongMsg);
-        }
-        else if (message.startsWith("DEVICE_CONNECTED:")) {
-          // Обработка подключения нового устройства
-          String deviceName = message.substring(17);
-          Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
-          String welcomeDeviceMsg = "WELCOME:" + deviceName;
-          webSocket.sendTXT(num, welcomeDeviceMsg);
-        }
-      }
-      break;
-      
-    case WStype_ERROR:
-      Serial.printf("[%u] WebSocket error\n", num);
-      break;
-  }
-}
-
 // Обработчик главной страницы
 void handleRoot() {
   Serial.println("Serving HTML page...");
   server.send_P(200, "text/html", htmlPage);
 }
+
 
 // API для получения списка устройств
 void handleApiDevices() {
@@ -752,26 +875,79 @@ void handleApiDevices() {
   
   JsonArray devicesArray = doc.createNestedArray("devices");
   
+  // Создаем массив для отслеживания уникальных IP
+  String uniqueIPs[MAX_DEVICES];
+  int uniqueCount = 0;
+  
+  // Сначала добавляем устройства с MPU6050
   for (int i = 0; i < deviceCount; i++) {
-    JsonObject deviceObj = devicesArray.createNestedObject();
-    deviceObj["ip"] = devices[i].ip;
-    deviceObj["mac"] = devices[i].mac;
-    deviceObj["hostname"] = devices[i].hostname;
-    deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
-    deviceObj["rssi"] = devices[i].rssi;
-    deviceObj["ipFixed"] = devices[i].ipFixed;
-    deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
-    deviceObj["connected"] = devices[i].connected;
-    
     if (devices[i].hasMPU6050) {
-      deviceObj["pitch"] = devices[i].pitch;
-      deviceObj["roll"] = devices[i].roll;
-      deviceObj["yaw"] = devices[i].yaw;
-      deviceObj["relPitch"] = devices[i].relPitch;
-      deviceObj["relRoll"] = devices[i].relRoll;
-      deviceObj["relYaw"] = devices[i].relYaw;
+      bool ipExists = false;
+      for (int j = 0; j < uniqueCount; j++) {
+        if (uniqueIPs[j] == devices[i].ip) {
+          ipExists = true;
+          break;
+        }
+      }
+      
+      if (!ipExists) {
+        // Добавляем IP в список уникальных
+        uniqueIPs[uniqueCount++] = devices[i].ip;
+        
+        // Добавляем устройство в JSON
+        JsonObject deviceObj = devicesArray.createNestedObject();
+        deviceObj["ip"] = devices[i].ip;
+        deviceObj["mac"] = devices[i].mac;
+        deviceObj["hostname"] = devices[i].hostname;
+        deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
+        deviceObj["rssi"] = devices[i].rssi;
+        deviceObj["ipFixed"] = devices[i].ipFixed;
+        deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
+        deviceObj["connected"] = devices[i].connected;
+        
+        if (devices[i].hasMPU6050) {
+          deviceObj["pitch"] = devices[i].pitch;
+          deviceObj["roll"] = devices[i].roll;
+          deviceObj["yaw"] = devices[i].yaw;
+          deviceObj["relPitch"] = devices[i].relPitch;
+          deviceObj["relRoll"] = devices[i].relRoll;
+          deviceObj["relYaw"] = devices[i].relYaw;
+        }
+      }
     }
   }
+  
+  // Затем добавляем остальные устройства (без MPU6050)
+  for (int i = 0; i < deviceCount; i++) {
+    if (!devices[i].hasMPU6050) {
+      bool ipExists = false;
+      for (int j = 0; j < uniqueCount; j++) {
+        if (uniqueIPs[j] == devices[i].ip) {
+          ipExists = true;
+          break;
+        }
+      }
+      
+      if (!ipExists) {
+        // Добавляем IP в список уникальных
+        uniqueIPs[uniqueCount++] = devices[i].ip;
+        
+        // Добавляем устройство в JSON
+        JsonObject deviceObj = devicesArray.createNestedObject();
+        deviceObj["ip"] = devices[i].ip;
+        deviceObj["mac"] = devices[i].mac;
+        deviceObj["hostname"] = devices[i].hostname;
+        deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
+        deviceObj["rssi"] = devices[i].rssi;
+        deviceObj["ipFixed"] = devices[i].ipFixed;
+        deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
+        deviceObj["connected"] = devices[i].connected;
+      }
+    }
+  }
+  
+  // Обновляем общее количество устройств для отображения
+  doc["totalDevices"] = uniqueCount;
   
   String json;
   serializeJson(doc, json);
@@ -840,8 +1016,13 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
   
+  // Запуск WebSocket сервера для веб-клиентов
+  webSocketWeb.begin();
+  webSocketWeb.onEvent(webSocketWebEvent);
+  
   Serial.println("HTTP server started on port 80");
-  Serial.println("WebSocket server started on port 81 for VR clients");
+  Serial.println("WebSocket server for VR clients started on port 81");
+  Serial.println("WebSocket server for web clients started on port 82");
   Serial.println("Ready to receive MPU6050 data from VR headsets!");
   
   // Первое сканирование
@@ -853,6 +1034,7 @@ void setup() {
 void loop() {
   server.handleClient();
   webSocket.loop();
+  webSocketWeb.loop();
   
   if (millis() - lastScanTime >= SCAN_INTERVAL) {
     scanNetwork();
