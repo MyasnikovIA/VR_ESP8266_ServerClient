@@ -19,9 +19,10 @@ WebSocketsServer webSocketWeb = WebSocketsServer(82);
 
 // Структура для хранения информации об устройстве
 struct DeviceInfo {
-  String ip;
-  String mac;
-  String hostname;
+  char ip[16];
+  char mac[18];
+  char hostname[32];
+  char customName[32];
   int rssi;
   bool ipFixed;
   bool hasMPU6050;
@@ -37,10 +38,16 @@ struct DeviceInfo {
 
 // Структура для настроек сети
 struct NetworkSettings {
-  String ssid;
-  String password;
-  String subnet;
+  char ssid[32];
+  char password[32];
+  char subnet[4];
   bool configured;
+};
+
+// Структура для хранения пользовательских имен устройств
+struct DeviceAlias {
+  char mac[18];
+  char alias[32];
 };
 
 // Массив для хранения подключенных устройств
@@ -48,12 +55,22 @@ const int MAX_DEVICES = 20;
 DeviceInfo devices[MAX_DEVICES];
 int deviceCount = 0;
 
+// Массив для хранения пользовательских имен
+const int MAX_ALIASES = 30;
+DeviceAlias deviceAliases[MAX_ALIASES];
+int aliasCount = 0;
+
 // Настройки сети
 NetworkSettings networkSettings;
 
 // Время последнего сканирования
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
+
+// Время последней записи в EEPROM
+unsigned long lastEEPROMSave = 0;
+const unsigned long EEPROM_SAVE_INTERVAL = 5000;
+bool eepromDirty = false;
 
 // Упрощенная HTML страница (старый функционал)
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -75,7 +92,8 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .device-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: 8px; transition: all 0.3s; }
         .device-card.vr-device { border-left: 4px solid #e74c3c; background: #fff5f5; }
         .device-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
-        .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; }
+        .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; cursor: pointer; }
+        .device-name:hover { color: #3498db; text-decoration: underline; }
         .device-status { padding: 2px 5px; border-radius: 6px; font-size: 9px; }
         .status-online { background: #27ae60; color: white; }
         .status-offline { background: #95a5a6; color: white; }
@@ -179,9 +197,36 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <!-- Modal for device name editing -->
+    <div id="renameModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">✏️ Rename Device</div>
+                <span class="close" onclick="closeModal('renameModal')">&times;</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">MAC Address:</label>
+                <input type="text" id="renameMac" class="form-input" readonly>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Current Name:</label>
+                <input type="text" id="renameCurrent" class="form-input" readonly>
+            </div>
+            <div class="form-group">
+                <label class="form-label">New Name:</label>
+                <input type="text" id="renameNew" class="form-input" maxlength="30" placeholder="Enter custom name">
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeModal('renameModal')">Cancel</button>
+                <button class="btn btn-settings" onclick="saveDeviceName()">💾 Save Name</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let autoRefreshInterval = null;
         let webSocketClient = null;
+        let currentEditMac = '';
         
         function connectWebSocket() {
             const serverIp = document.getElementById('espIp').textContent;
@@ -233,7 +278,6 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         }
         
         function calibrateSensor(ip) {
-            
             fetch('/api/calibrate', {
                 method: 'POST',
                 headers: {
@@ -277,6 +321,51 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             });
         }
         
+        function editDeviceName(mac, currentName) {
+            currentEditMac = mac;
+            document.getElementById('renameMac').value = mac;
+            document.getElementById('renameCurrent').value = currentName;
+            document.getElementById('renameNew').value = currentName;
+            document.getElementById('renameModal').style.display = 'block';
+            document.getElementById('renameNew').focus();
+        }
+        
+        function saveDeviceName() {
+            const newName = document.getElementById('renameNew').value.trim();
+            const mac = currentEditMac;
+            
+            if (!newName) {
+                alert('Please enter a name');
+                return;
+            }
+            
+            if (newName.length > 30) {
+                alert('Name too long (max 30 characters)');
+                return;
+            }
+            
+            fetch('/api/rename', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'mac=' + encodeURIComponent(mac) + '&name=' + encodeURIComponent(newName)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    closeModal('renameModal');
+                    refreshData(); // Обновляем отображение
+                } else {
+                    alert('Ошибка: ' + (data.message || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Ошибка сохранения имени');
+            });
+        }
+        
         function refreshData() {
             const btn = document.getElementById('refreshBtn');
             btn.innerHTML = '⏳ Scanning...';
@@ -314,7 +403,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             container.innerHTML = data.devices.map(device => `
                 <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''}" data-ip="${device.ip}">
                     <div class="device-header">
-                        <div class="device-name">
+                        <div class="device-name" onclick="editDeviceName('${device.mac}', '${device.displayName.replace(/'/g, "\\'")}')">
                             ${getDeviceIcon(device)} ${device.displayName}
                             ${device.hasMPU6050 ? '<span class="vr-badge">VR</span>' : ''}
                         </div>
@@ -494,10 +583,18 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+// Функция для безопасного копирования строк
+void safeStrcpy(char* dest, const char* src, size_t destSize) {
+  if (destSize > 0) {
+    strncpy(dest, src, destSize - 1);
+    dest[destSize - 1] = '\0';
+  }
+}
+
 // Функция для поиска устройства в массиве
-int findDeviceByMAC(const String& mac) {
+int findDeviceByMAC(const char* mac) {
   for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].mac == mac) {
+    if (strcmp(devices[i].mac, mac) == 0) {
       return i;
     }
   }
@@ -505,9 +602,19 @@ int findDeviceByMAC(const String& mac) {
 }
 
 // Функция для поиска устройства по IP
-int findDeviceByIP(const String& ip) {
+int findDeviceByIP(const char* ip) {
   for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].ip == ip) {
+    if (strcmp(devices[i].ip, ip) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для поиска алиаса по MAC
+int findAliasByMAC(const char* mac) {
+  for (int i = 0; i < aliasCount; i++) {
+    if (strcmp(deviceAliases[i].mac, mac) == 0) {
       return i;
     }
   }
@@ -515,19 +622,27 @@ int findDeviceByIP(const String& ip) {
 }
 
 // Функция для получения отображаемого имени устройства
-String getDisplayName(const String& mac, const String& originalHostname) {
-  return originalHostname.length() > 0 ? originalHostname : "Unknown";
+String getDisplayName(const char* mac, const char* originalHostname) {
+  // Сначала ищем пользовательское имя
+  int aliasIndex = findAliasByMAC(mac);
+  if (aliasIndex != -1) {
+    return String(deviceAliases[aliasIndex].alias);
+  }
+  
+  // Если пользовательского имени нет, используем оригинальное
+  return originalHostname && strlen(originalHostname) > 0 ? String(originalHostname) : "Unknown";
 }
 
 // Функция для добавления нового устройства
-void addDevice(const String& ip, const String& mac, const String& hostname, int rssi) {
+void addDevice(const char* ip, const char* mac, const char* hostname, int rssi) {
   int index = findDeviceByMAC(mac);
   
   if (index == -1) {
     if (deviceCount < MAX_DEVICES) {
-      devices[deviceCount].ip = ip;
-      devices[deviceCount].mac = mac;
-      devices[deviceCount].hostname = hostname;
+      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
+      safeStrcpy(devices[deviceCount].mac, mac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].hostname, hostname, sizeof(devices[deviceCount].hostname));
+      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
       devices[deviceCount].rssi = rssi;
       devices[deviceCount].ipFixed = false;
       devices[deviceCount].hasMPU6050 = false;
@@ -542,20 +657,22 @@ void addDevice(const String& ip, const String& mac, const String& hostname, int 
       deviceCount++;
       
       Serial.printf("New device: %s (%s) - %s - RSSI: %d\n", 
-                   hostname.c_str(), ip.c_str(), mac.c_str(), rssi);
+                   hostname, ip, mac, rssi);
+    } else {
+      Serial.println("Device limit reached!");
     }
   } else {
     devices[index].rssi = rssi;
-    devices[index].ip = ip;
+    safeStrcpy(devices[index].ip, ip, sizeof(devices[index].ip));
     devices[index].connected = true;
-    if (hostname.length() > 0) {
-      devices[index].hostname = hostname;
+    if (hostname && strlen(hostname) > 0) {
+      safeStrcpy(devices[index].hostname, hostname, sizeof(devices[index].hostname));
     }
   }
 }
 
 // Функция для обновления данных MPU6050 от VR-клиента
-void updateVRDeviceData(const String& ip, const String& deviceName, 
+void updateVRDeviceData(const char* ip, const char* deviceName, 
                        float pitch, float roll, float yaw,
                        float relPitch, float relRoll, float relYaw) {
   int index = findDeviceByIP(ip);
@@ -563,9 +680,14 @@ void updateVRDeviceData(const String& ip, const String& deviceName,
   if (index == -1) {
     // Создаем новое устройство если не найдено
     if (deviceCount < MAX_DEVICES) {
-      devices[deviceCount].ip = ip;
-      devices[deviceCount].mac = "VR:" + deviceName;
-      devices[deviceCount].hostname = deviceName;
+      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
+      
+      char vrMac[32];
+      snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
+      safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
+      
+      safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
+      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
       devices[deviceCount].rssi = -50;
       devices[deviceCount].ipFixed = false;
       devices[deviceCount].hasMPU6050 = true;
@@ -580,7 +702,9 @@ void updateVRDeviceData(const String& ip, const String& deviceName,
       deviceCount++;
       
       Serial.printf("New VR device: %s (%s) - Pitch: %.1f, Roll: %.1f, Yaw: %.1f\n", 
-                   deviceName.c_str(), ip.c_str(), pitch, roll, yaw);
+                   deviceName, ip, pitch, roll, yaw);
+    } else {
+      Serial.println("Device limit reached! Cannot add new VR device");
     }
   } else {
     // Обновляем существующее устройство
@@ -594,8 +718,8 @@ void updateVRDeviceData(const String& ip, const String& deviceName,
     devices[index].lastUpdate = millis();
     devices[index].connected = true;
     
-    if (deviceName.length() > 0) {
-      devices[index].hostname = deviceName;
+    if (deviceName && strlen(deviceName) > 0) {
+      safeStrcpy(devices[index].hostname, deviceName, sizeof(devices[index].hostname));
     }
     
     // Отправляем обновление через WebSocket всем веб-клиентам
@@ -616,7 +740,7 @@ void updateVRDeviceData(const String& ip, const String& deviceName,
     webSocketWeb.broadcastTXT(json);
     
     Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", 
-                 ip.c_str(), pitch, roll, yaw);
+                 ip, pitch, roll, yaw);
   }
 }
 
@@ -631,19 +755,19 @@ void scanNetwork() {
   }
   
   while (station != NULL) {
-    String ip = IPAddress(station->ip).toString();
-    String mac = "";
-    for(int i = 0; i < 6; i++) {
-      if (i > 0) mac += ":";
-      String hex = String(station->bssid[i], HEX);
-      if (hex.length() == 1) hex = "0" + hex;
-      mac += hex;
-    }
+    char ip[16];
+    snprintf(ip, sizeof(ip), "%d.%d.%d.%d", 
+             station->ip.addr & 0xFF,
+             (station->ip.addr >> 8) & 0xFF,
+             (station->ip.addr >> 16) & 0xFF,
+             (station->ip.addr >> 24) & 0xFF);
     
-    String hostname = "";
-    int rssi = -50;
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+             station->bssid[0], station->bssid[1], station->bssid[2],
+             station->bssid[3], station->bssid[4], station->bssid[5]);
     
-    addDevice(ip, mac, hostname, rssi);
+    addDevice(ip, mac, "", -50);
     onlineCount++;
     
     station = STAILQ_NEXT(station, next);
@@ -672,20 +796,20 @@ void saveNetworkSettingsToEEPROM() {
   EEPROM.write(addr++, networkSettings.configured ? 1 : 0);
   
   // Сохраняем SSID
-  EEPROM.write(addr++, networkSettings.ssid.length());
-  for (int j = 0; j < networkSettings.ssid.length(); j++) {
+  EEPROM.write(addr++, strlen(networkSettings.ssid));
+  for (size_t j = 0; j < strlen(networkSettings.ssid); j++) {
     EEPROM.write(addr++, networkSettings.ssid[j]);
   }
   
   // Сохраняем пароль
-  EEPROM.write(addr++, networkSettings.password.length());
-  for (int j = 0; j < networkSettings.password.length(); j++) {
+  EEPROM.write(addr++, strlen(networkSettings.password));
+  for (size_t j = 0; j < strlen(networkSettings.password); j++) {
     EEPROM.write(addr++, networkSettings.password[j]);
   }
   
   // Сохраняем подсеть
-  EEPROM.write(addr++, networkSettings.subnet.length());
-  for (int j = 0; j < networkSettings.subnet.length(); j++) {
+  EEPROM.write(addr++, strlen(networkSettings.subnet));
+  for (size_t j = 0; j < strlen(networkSettings.subnet); j++) {
     EEPROM.write(addr++, networkSettings.subnet[j]);
   }
   
@@ -705,46 +829,129 @@ void loadNetworkSettingsFromEEPROM() {
   if (networkSettings.configured) {
     // Загружаем SSID
     int ssidLen = EEPROM.read(addr++);
-    networkSettings.ssid = "";
-    for (int j = 0; j < ssidLen; j++) {
-      networkSettings.ssid += char(EEPROM.read(addr++));
+    for (int j = 0; j < ssidLen && j < 31; j++) {
+      networkSettings.ssid[j] = EEPROM.read(addr++);
     }
+    networkSettings.ssid[ssidLen] = '\0';
     
     // Загружаем пароль
     int passwordLen = EEPROM.read(addr++);
-    networkSettings.password = "";
-    for (int j = 0; j < passwordLen; j++) {
-      networkSettings.password += char(EEPROM.read(addr++));
+    for (int j = 0; j < passwordLen && j < 31; j++) {
+      networkSettings.password[j] = EEPROM.read(addr++);
     }
+    networkSettings.password[passwordLen] = '\0';
     
     // Загружаем подсеть
     int subnetLen = EEPROM.read(addr++);
-    networkSettings.subnet = "";
-    for (int j = 0; j < subnetLen; j++) {
-      networkSettings.subnet += char(EEPROM.read(addr++));
+    for (int j = 0; j < subnetLen && j < 3; j++) {
+      networkSettings.subnet[j] = EEPROM.read(addr++);
     }
+    networkSettings.subnet[subnetLen] = '\0';
   } else {
     // Значения по умолчанию
-    networkSettings.ssid = ap_ssid;
-    networkSettings.password = ap_password;
-    networkSettings.subnet = "50";
+    safeStrcpy(networkSettings.ssid, ap_ssid, sizeof(networkSettings.ssid));
+    safeStrcpy(networkSettings.password, ap_password, sizeof(networkSettings.password));
+    safeStrcpy(networkSettings.subnet, "50", sizeof(networkSettings.subnet));
   }
   
   EEPROM.end();
   
   Serial.printf("Network settings loaded: SSID=%s, Subnet=%s\n", 
-                networkSettings.ssid.c_str(), networkSettings.subnet.c_str());
+                networkSettings.ssid, networkSettings.subnet);
+}
+
+// Функция для сохранения алиасов устройств в EEPROM
+void saveAliasesToEEPROM() {
+  EEPROM.begin(1024); // Увеличиваем размер для алиасов
+  
+  int addr = 512; // Начинаем после сетевых настроек
+  EEPROM.write(addr++, aliasCount);
+  
+  for (int i = 0; i < aliasCount; i++) {
+    // Сохраняем MAC
+    EEPROM.write(addr++, strlen(deviceAliases[i].mac));
+    for (size_t j = 0; j < strlen(deviceAliases[i].mac); j++) {
+      EEPROM.write(addr++, deviceAliases[i].mac[j]);
+    }
+    
+    // Сохраняем алиас
+    EEPROM.write(addr++, strlen(deviceAliases[i].alias));
+    for (size_t j = 0; j < strlen(deviceAliases[i].alias); j++) {
+      EEPROM.write(addr++, deviceAliases[i].alias[j]);
+    }
+  }
+  
+  EEPROM.commit();
+  EEPROM.end();
+  
+  Serial.println("Device aliases saved to EEPROM");
+  eepromDirty = false;
+}
+
+// Функция для загрузки алиасов устройств из EEPROM
+void loadAliasesFromEEPROM() {
+  EEPROM.begin(1024);
+  
+  int addr = 512;
+  aliasCount = EEPROM.read(addr++);
+  
+  if (aliasCount > MAX_ALIASES) {
+    aliasCount = 0;
+    EEPROM.end();
+    return;
+  }
+  
+  for (int i = 0; i < aliasCount; i++) {
+    // Загружаем MAC
+    int macLen = EEPROM.read(addr++);
+    for (int j = 0; j < macLen && j < 17; j++) {
+      deviceAliases[i].mac[j] = EEPROM.read(addr++);
+    }
+    deviceAliases[i].mac[macLen] = '\0';
+    
+    // Загружаем алиас
+    int aliasLen = EEPROM.read(addr++);
+    for (int j = 0; j < aliasLen && j < 31; j++) {
+      deviceAliases[i].alias[j] = EEPROM.read(addr++);
+    }
+    deviceAliases[i].alias[aliasLen] = '\0';
+  }
+  
+  EEPROM.end();
+  
+  Serial.printf("Loaded %d device aliases from EEPROM\n", aliasCount);
 }
 
 // Функция для очистки EEPROM
 void clearEEPROM() {
-  EEPROM.begin(512);
-  for (int i = 0; i < 512; i++) {
+  EEPROM.begin(1024);
+  for (int i = 0; i < 1024; i++) {
     EEPROM.write(i, 0);
   }
   EEPROM.commit();
   EEPROM.end();
   Serial.println("EEPROM cleared successfully");
+}
+
+// Валидация WebSocket сообщений
+bool isValidWebSocketMessage(const String& message) {
+  // Проверяем длину сообщения
+  if (message.length() == 0 || message.length() > 512) {
+    return false;
+  }
+  
+  // Проверяем на наличие недопустимых символов
+  for (unsigned int i = 0; i < message.length(); i++) {
+    char c = message[i];
+    if (c < 32 && c != '\n' && c != '\r' && c != '\t') {
+      return false; // Управляющие символы
+    }
+    if (c > 126) {
+      return false; // Не-ASCII символы
+    }
+  }
+  
+  return true;
 }
 
 // Обработчик WebSocket событий для веб-клиентов
@@ -768,6 +975,14 @@ void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t len
     case WStype_TEXT:
       {
         String message = String((char*)payload);
+        
+        // Валидация входящего сообщения
+        if (!isValidWebSocketMessage(message)) {
+          Serial.printf("[WEB %u] Invalid WebSocket message received\n", num);
+          webSocketWeb.sendTXT(num, "{\"type\":\"error\",\"message\":\"Invalid message\"}");
+          return;
+        }
+        
         Serial.printf("[WEB %u] Received: %s\n", num, message.c_str());
         
         // Обработка команд от веб-клиентов
@@ -783,8 +998,23 @@ void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t len
   }
 }
 
+
+// Вспомогательная функция для извлечения значения из строки
+float extractValue(const String& message, const String& key) {
+  int keyPos = message.indexOf(key);
+  if (keyPos == -1) return 0.0;
+  
+  int valueStart = keyPos + key.length();
+  int valueEnd = message.indexOf(',', valueStart);
+  if (valueEnd == -1) valueEnd = message.length();
+  
+  String valueStr = message.substring(valueStart, valueEnd);
+  return valueStr.toFloat();
+}
+
+
 // Функция для парсинга данных MPU6050 из строки
-bool parseMPU6050Data(const String& message, String& deviceName, 
+bool parseMPU6050Data(const String& message, char* deviceName, 
                      float& pitch, float& roll, float& yaw,
                      float& relPitch, float& relRoll, float& relYaw) {
   // Пример формата: "DEVICE:VR-Head-Hom-001,PITCH:13.3,ROLL:5.7,YAW:-9.7,REL_PITCH:13.30,REL_ROLL:5.68,REL_YAW:-9.70,ACC_PITCH:13.30,ACC_ROLL:5.68,ACC_YAW:-9.70,ZERO_SET:false,TIMESTAMP:237540"
@@ -798,7 +1028,8 @@ bool parseMPU6050Data(const String& message, String& deviceName,
   int endPos = message.indexOf(',', startPos);
   if (endPos == -1) return false;
   
-  deviceName = message.substring(startPos, endPos);
+  String deviceNameStr = message.substring(startPos, endPos);
+  safeStrcpy(deviceName, deviceNameStr.c_str(), 32);
   
   // Парсим основные значения
   pitch = extractValue(message, "PITCH:");
@@ -809,19 +1040,6 @@ bool parseMPU6050Data(const String& message, String& deviceName,
   relYaw = extractValue(message, "REL_YAW:");
   
   return true;
-}
-
-// Вспомогательная функция для извлечения значения из строки
-float extractValue(const String& message, const String& key) {
-  int keyPos = message.indexOf(key);
-  if (keyPos == -1) return 0.0;
-  
-  int valueStart = keyPos + key.length();
-  int valueEnd = message.indexOf(',', valueStart);
-  if (valueEnd == -1) valueEnd = message.length();
-  
-  String valueStr = message.substring(valueStart, valueEnd);
-  return valueStr.toFloat();
 }
 
 // Обработчик WebSocket событий для VR-клиентов
@@ -846,24 +1064,33 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       {
         String message = String((char*)payload);
         IPAddress ip = webSocket.remoteIP(num);
+        
+        // Валидация входящего сообщения
+        if (!isValidWebSocketMessage(message)) {
+          Serial.printf("[VR %u] Invalid WebSocket message received\n", num);
+          webSocket.sendTXT(num, "ERROR:INVALID_MESSAGE");
+          return;
+        }
+        
         Serial.printf("[VR %u] Received from VR Client: %s\n", num, message.c_str());
         
         // Обработка данных от VR-клиента
         if (message.startsWith("DEVICE:")) {
-          String deviceName = "";
+          char deviceName[32] = "";
           float pitch = 0, roll = 0, yaw = 0;
           float relPitch = 0, relRoll = 0, relYaw = 0;
           
           // Парсим данные MPU6050
           if (parseMPU6050Data(message, deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw)) {
             // Обновляем данные устройства
-            updateVRDeviceData(ip.toString(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
+            updateVRDeviceData(ip.toString().c_str(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
             
             // Отправляем подтверждение
             String ackMsg = "DATA_RECEIVED";
             webSocket.sendTXT(num, ackMsg);
           } else {
             Serial.println("Error parsing MPU6050 data");
+            webSocket.sendTXT(num, "ERROR:PARSING_FAILED");
           }
         }
         else if (message == "PING") {
@@ -885,6 +1112,9 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           Serial.printf("[VR %u] Angles reset to zero\n", num);
           // Можно добавить дополнительную логику при сбросе углов
         }
+        else {
+          webSocket.sendTXT(num, "ERROR:UNKNOWN_COMMAND");
+        }
       }
       break;
       
@@ -901,7 +1131,7 @@ void setupWiFiAP() {
   WiFi.mode(WIFI_AP);
   
   // Конвертируем подсеть в число
-  int subnet = networkSettings.subnet.toInt();
+  int subnet = atoi(networkSettings.subnet);
   if (subnet < 1 || subnet > 254) {
     subnet = 50; // Значение по умолчанию при ошибке
   }
@@ -910,7 +1140,7 @@ void setupWiFiAP() {
   IPAddress gateway(192, 168, subnet, 1);
   IPAddress subnet_mask(255, 255, 255, 0);
   
-  WiFi.softAP(networkSettings.ssid.c_str(), networkSettings.password.c_str());
+  WiFi.softAP(networkSettings.ssid, networkSettings.password);
   WiFi.softAPConfig(local_ip, gateway, subnet_mask);
   
   Serial.println("Access Point Started");
@@ -937,15 +1167,18 @@ void handleApiDevices() {
   // Сначала проходим по всем устройствам и собираем устройства с MPU6050
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].hasMPU6050) {
-      bool exists = false;
-      for (int j = 0; j < uniqueCount; j++) {
-        if (uniqueDevices[j].ip == devices[i].ip) {
-          exists = true;
-          break;
+      if (uniqueCount < MAX_DEVICES) {
+        bool exists = false;
+        for (int j = 0; j < uniqueCount; j++) {
+          if (strcmp(uniqueDevices[j].ip, devices[i].ip) == 0) {
+            exists = true;
+            break;
+          }
         }
-      }
-      if (!exists) {
-        uniqueDevices[uniqueCount++] = devices[i];
+        if (!exists) {
+          memcpy(&uniqueDevices[uniqueCount], &devices[i], sizeof(DeviceInfo));
+          uniqueCount++;
+        }
       }
     }
   }
@@ -953,15 +1186,18 @@ void handleApiDevices() {
   // Затем добавляем устройства без MPU6050
   for (int i = 0; i < deviceCount; i++) {
     if (!devices[i].hasMPU6050) {
-      bool exists = false;
-      for (int j = 0; j < uniqueCount; j++) {
-        if (uniqueDevices[j].ip == devices[i].ip) {
-          exists = true;
-          break;
+      if (uniqueCount < MAX_DEVICES) {
+        bool exists = false;
+        for (int j = 0; j < uniqueCount; j++) {
+          if (strcmp(uniqueDevices[j].ip, devices[i].ip) == 0) {
+            exists = true;
+            break;
+          }
         }
-      }
-      if (!exists) {
-        uniqueDevices[uniqueCount++] = devices[i];
+        if (!exists) {
+          memcpy(&uniqueDevices[uniqueCount], &devices[i], sizeof(DeviceInfo));
+          uniqueCount++;
+        }
       }
     }
   }
@@ -1018,7 +1254,7 @@ void handleApiCalibrate() {
     Serial.printf("Calibration request for device: %s\n", ip.c_str());
     
     // Находим устройство по IP
-    int deviceIndex = findDeviceByIP(ip);
+    int deviceIndex = findDeviceByIP(ip.c_str());
     if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
       // Отправляем команду калибровки через WebSocket
       bool commandSent = false;
@@ -1052,7 +1288,7 @@ void handleApiReset() {
     Serial.printf("Reset angles request for device: %s\n", ip.c_str());
     
     // Находим устройство по IP
-    int deviceIndex = findDeviceByIP(ip);
+    int deviceIndex = findDeviceByIP(ip.c_str());
     if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
       // Отправляем команду сброса через WebSocket
       bool commandSent = false;
@@ -1079,6 +1315,49 @@ void handleApiReset() {
   }
 }
 
+// API для переименования устройства
+void handleApiRename() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    String name = server.arg("name");
+    
+    Serial.printf("Rename request - MAC: %s, Name: %s\n", mac.c_str(), name.c_str());
+    
+    if (mac.length() > 0 && name.length() > 0 && name.length() <= 30) {
+      // Ищем существующий алиас
+      int aliasIndex = findAliasByMAC(mac.c_str());
+      
+      if (aliasIndex != -1) {
+        // Обновляем существующий алиас
+        safeStrcpy(deviceAliases[aliasIndex].alias, name.c_str(), sizeof(deviceAliases[aliasIndex].alias));
+        Serial.printf("Updated alias for MAC %s: %s\n", mac.c_str(), name.c_str());
+      } else {
+        // Создаем новый алиас
+        if (aliasCount < MAX_ALIASES) {
+          safeStrcpy(deviceAliases[aliasCount].mac, mac.c_str(), sizeof(deviceAliases[aliasCount].mac));
+          safeStrcpy(deviceAliases[aliasCount].alias, name.c_str(), sizeof(deviceAliases[aliasCount].alias));
+          aliasCount++;
+          Serial.printf("Created new alias for MAC %s: %s\n", mac.c_str(), name.c_str());
+        } else {
+          server.send(507, "application/json", "{\"status\":\"error\",\"message\":\"Alias limit reached\"}");
+          return;
+        }
+      }
+      
+      // Помечаем EEPROM как требующее сохранения
+      eepromDirty = true;
+      lastEEPROMSave = millis();
+      
+      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Device name saved\"}");
+      
+    } else {
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
 // API для сохранения настроек
 void handleApiSettings() {
   if (server.method() == HTTP_POST) {
@@ -1090,9 +1369,9 @@ void handleApiSettings() {
     
     if (ssid.length() > 0 && password.length() >= 8 && subnet.length() > 0) {
       // Сохраняем новые настройки
-      networkSettings.ssid = ssid;
-      networkSettings.password = password;
-      networkSettings.subnet = subnet;
+      safeStrcpy(networkSettings.ssid, ssid.c_str(), sizeof(networkSettings.ssid));
+      safeStrcpy(networkSettings.password, password.c_str(), sizeof(networkSettings.password));
+      safeStrcpy(networkSettings.subnet, subnet.c_str(), sizeof(networkSettings.subnet));
       networkSettings.configured = true;
       
       saveNetworkSettingsToEEPROM();
@@ -1126,6 +1405,9 @@ void setup() {
   // Загрузка настроек сети из EEPROM
   loadNetworkSettingsFromEEPROM();
   
+  // Загрузка алиасов устройств из EEPROM
+  loadAliasesFromEEPROM();
+  
   // Настройка WiFi
   setupWiFiAP();
   
@@ -1134,6 +1416,7 @@ void setup() {
   server.on("/api/devices", handleApiDevices);
   server.on("/api/calibrate", HTTP_POST, handleApiCalibrate);
   server.on("/api/reset", HTTP_POST, handleApiReset);
+  server.on("/api/rename", HTTP_POST, handleApiRename);
   server.on("/api/settings", HTTP_POST, handleApiSettings);
   
   // Запуск сервера
@@ -1165,6 +1448,11 @@ void loop() {
   
   if (millis() - lastScanTime >= SCAN_INTERVAL) {
     scanNetwork();
+  }
+  
+  // Буферизованное сохранение в EEPROM
+  if (eepromDirty && (millis() - lastEEPROMSave >= EEPROM_SAVE_INTERVAL)) {
+    saveAliasesToEEPROM();
   }
   
   delay(100);
