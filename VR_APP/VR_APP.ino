@@ -302,8 +302,8 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
       
       char vrMac[32];
       snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
-      safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
-      safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
+      // safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
+      // safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
       
       safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
       safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
@@ -372,6 +372,7 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
 }
 
 // Функция сканирования сети
+// Функция сканирования сети
 void scanNetwork() {
   Serial.println("Starting network scan...");
   
@@ -392,8 +393,24 @@ void scanNetwork() {
     IPAddress ipAddr = IPAddress(station->ip);
     snprintf(ip, sizeof(ip), "%d.%d.%d.%d", ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3]);
     
-    // Используем фиксированное значение RSSI, так как структура не содержит эту информацию
-    addDevice(ip, mac, "WiFi Client", -50);
+    // Проверяем, является ли устройство VR-устройством
+    bool isVRDevice = false;
+    for (int i = 0; i < deviceCount; i++) {
+      if (strcmp(devices[i].mac, mac) == 0 && devices[i].hasMPU6050) {
+        isVRDevice = true;
+        break;
+      }
+    }
+    
+    // Добавляем устройство только если:
+    // 1. Это VR-устройство, ИЛИ
+    // 2. Это не дубликат (по MAC-адресу)
+    if (isVRDevice || findDeviceByMAC(mac) == -1) {
+      // Используем фиксированное значение RSSI, так как структура не содержит эту информацию
+      addDevice(ip, mac, "WiFi Client", -50);
+    } else {
+      Serial.printf("Skipping duplicate device: %s (%s)\n", mac, ip);
+    }
     
     station = STAILQ_NEXT(station, next);
   }
@@ -1382,10 +1399,6 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         <span class="info-label">Original MAC:</span>
                         <span class="info-value">${formatMac(device.originalMac)}</span>
                     </div>
-                    <div class="info-row">
-                        <span class="info-label">Signal:</span>
-                        <span class="info-value">${device.rssi} dBm</span>
-                    </div>
                     <div class="ip-controls">
                         <button class="ip-btn fix" onclick="manageIP('${device.mac}', '${device.displayName.replace(/'/g, "\\'")}', '${device.ip}', ${device.ipFixed})">
                             ${device.ipFixed ? 'Change Fixed IP' : 'Fix IP Address'}
@@ -1552,63 +1565,154 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // Восстанавливаем оригинальные обработчики API
+// API для получения списка устройств с объединением дубликатов по IP
 void handleApiDevices() {
   Serial.println("API devices requested");
   
   DynamicJsonDocument doc(2048);
   
-  // Подсчет статистики
+  // Временный массив для объединения устройств по IP
+  struct MergedDevice {
+    String ip;
+    bool processed;
+    int deviceIndex;
+  };
+  
+  MergedDevice mergedDevices[MAX_DEVICES];
+  int mergedCount = 0;
+  
+  // Сначала собираем все уникальные IP
+  for (int i = 0; i < deviceCount; i++) {
+    bool ipExists = false;
+    for (int j = 0; j < mergedCount; j++) {
+      if (mergedDevices[j].ip == devices[i].ip) {
+        ipExists = true;
+        break;
+      }
+    }
+    
+    if (!ipExists) {
+      mergedDevices[mergedCount].ip = devices[i].ip;
+      mergedDevices[mergedCount].processed = false;
+      mergedDevices[mergedCount].deviceIndex = i;
+      mergedCount++;
+    }
+  }
+  
+  // Теперь подсчитываем статистику на основе объединенных устройств
   int onlineCount = 0;
   int vrCount = 0;
   int fixedCount = 0;
-  
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].connected) {
-      onlineCount++;
-    }
-    if (devices[i].hasMPU6050) {
-      vrCount++;
-    }
-    if (devices[i].ipFixed) {
-      fixedCount++;
-    }
-  }
-  
-  doc["totalDevices"] = deviceCount;
-  doc["onlineDevices"] = onlineCount;
-  doc["vrDevices"] = vrCount;
-  doc["fixedIPs"] = fixedCount;
-  doc["espIp"] = WiFi.softAPIP().toString();
+  int actualDeviceCount = 0; // Реальное количество устройств после объединения
   
   JsonArray devicesArray = doc.createNestedArray("devices");
   
-  for (int i = 0; i < deviceCount; i++) {
-    JsonObject deviceObj = devicesArray.createNestedObject();
-    deviceObj["ip"] = devices[i].ip;
-    deviceObj["mac"] = devices[i].mac;
-    deviceObj["originalMac"] = devices[i].originalMac;
-    deviceObj["hostname"] = devices[i].hostname;
-    deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
-    deviceObj["rssi"] = devices[i].rssi;
-    deviceObj["ipFixed"] = devices[i].ipFixed;
-    deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
-    deviceObj["connected"] = devices[i].connected;
+  // Обрабатываем каждый уникальный IP и считаем статистику
+  for (int i = 0; i < mergedCount; i++) {
+    if (mergedDevices[i].processed) continue;
     
-    if (devices[i].hasMPU6050) {
-      deviceObj["pitch"] = devices[i].pitch;
-      deviceObj["roll"] = devices[i].roll;
-      deviceObj["yaw"] = devices[i].yaw;
-      deviceObj["relPitch"] = devices[i].relPitch;
-      deviceObj["relRoll"] = devices[i].relRoll;
-      deviceObj["relYaw"] = devices[i].relYaw;
+    String currentIP = mergedDevices[i].ip;
+    actualDeviceCount++; // Увеличиваем счетчик реальных устройств
+    
+    // Ищем все устройства с этим IP
+    DeviceInfo* vrDevice = nullptr;
+    DeviceInfo* normalDevice = nullptr;
+    bool isOnline = false;
+    bool isVR = false;
+    bool isFixed = false;
+    
+    for (int j = 0; j < deviceCount; j++) {
+      if (String(devices[j].ip) == currentIP) {
+        if (devices[j].hasMPU6050) {
+          vrDevice = &devices[j];
+          isVR = true;
+          if (devices[j].connected) isOnline = true;
+        } else {
+          normalDevice = &devices[j];
+          if (devices[j].connected) isOnline = true;
+          if (devices[j].ipFixed) isFixed = true;
+        }
+        mergedDevices[i].processed = true;
+      }
+    }
+    
+    // Обновляем статистику
+    if (isOnline) onlineCount++;
+    if (isVR) vrCount++;
+    if (isFixed) fixedCount++;
+    
+    // Создаем объединенное устройство
+    JsonObject deviceObj = devicesArray.createNestedObject();
+    
+    if (vrDevice != nullptr) {
+      // Используем данные VR устройства как основу
+      deviceObj["ip"] = vrDevice->ip;
+      deviceObj["mac"] = vrDevice->mac;
+      deviceObj["originalMac"] = vrDevice->originalMac;
+      deviceObj["hostname"] = vrDevice->hostname;
+      deviceObj["displayName"] = getDisplayName(vrDevice->mac, vrDevice->hostname);
+      deviceObj["rssi"] = vrDevice->rssi;
+      deviceObj["ipFixed"] = vrDevice->ipFixed;
+      deviceObj["hasMPU6050"] = vrDevice->hasMPU6050;
+      deviceObj["connected"] = vrDevice->connected;
+      
+      // Данные сенсора
+      deviceObj["pitch"] = vrDevice->pitch;
+      deviceObj["roll"] = vrDevice->roll;
+      deviceObj["yaw"] = vrDevice->yaw;
+      deviceObj["relPitch"] = vrDevice->relPitch;
+      deviceObj["relRoll"] = vrDevice->relRoll;
+      deviceObj["relYaw"] = vrDevice->relYaw;
+      
+    } else if (normalDevice != nullptr) {
+      // Используем данные обычного устройства
+      deviceObj["ip"] = normalDevice->ip;
+      deviceObj["mac"] = normalDevice->mac;
+      deviceObj["originalMac"] = normalDevice->originalMac;
+      deviceObj["hostname"] = normalDevice->hostname;
+      deviceObj["displayName"] = getDisplayName(normalDevice->mac, normalDevice->hostname);
+      deviceObj["rssi"] = normalDevice->rssi;
+      deviceObj["ipFixed"] = normalDevice->ipFixed;
+      deviceObj["hasMPU6050"] = normalDevice->hasMPU6050;
+      deviceObj["connected"] = normalDevice->connected;
+    }
+    
+    // Если есть оба типа устройств, объединяем лучшие атрибуты
+    if (vrDevice != nullptr && normalDevice != nullptr) {
+      // Предпочитаем MAC адрес из нормального устройства (он настоящий)
+      if (strlen(normalDevice->mac) > 0) {
+        deviceObj["mac"] = normalDevice->mac;
+        deviceObj["originalMac"] = normalDevice->originalMac;
+      }
+      
+      // Предпочитаем настройки IP из нормального устройства
+      deviceObj["ipFixed"] = normalDevice->ipFixed;
+      
+      // Состояние подключения берем из VR устройства (оно более актуально)
+      deviceObj["connected"] = vrDevice->connected;
+      
+      Serial.printf("Merged devices for IP %s: VR + Normal\n", currentIP.c_str());
     }
   }
+  
+  // Используем ПЕРЕСЧИТАННЫЕ значения
+  doc["totalDevices"] = actualDeviceCount;        // После объединения дубликатов
+  doc["onlineDevices"] = onlineCount;             // Пересчитанные онлайн устройства
+  doc["vrDevices"] = vrCount;                     // Пересчитанные VR устройства
+  doc["fixedIPs"] = fixedCount;                   // Пересчитанные фиксированные IP
+  doc["espIp"] = WiFi.softAPIP().toString();
   
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
-  Serial.println("API response sent successfully");
+  
+  Serial.printf("API response: %d devices (after merging duplicates from %d original)\n", 
+                actualDeviceCount, deviceCount);
+  Serial.printf("Online: %d, VR: %d, Fixed IPs: %d\n", onlineCount, vrCount, fixedCount);
 }
+
+
+
 
 // API для калибровки датчика
 void handleApiCalibrate() {
