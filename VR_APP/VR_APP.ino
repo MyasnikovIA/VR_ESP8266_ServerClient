@@ -17,6 +17,31 @@ WebSocketsServer webSocket = WebSocketsServer(81);
 // WebSocket сервер на порту 82 для веб-клиентов (обновление данных в реальном времени)
 WebSocketsServer webSocketWeb = WebSocketsServer(82);
 
+// DHCP сервер
+#include <WiFiUdp.h>
+WiFiUDP udp;
+const unsigned int DHCP_SERVER_PORT = 67;
+const unsigned int DHCP_CLIENT_PORT = 68;
+
+// DHCP структуры
+struct DHCPMessage {
+    uint8_t op;      // Message op code / message type.
+    uint8_t htype;   // Hardware address type
+    uint8_t hlen;    // Hardware address length
+    uint8_t hops;    // Hops
+    uint32_t xid;    // Transaction ID
+    uint16_t secs;   // Seconds
+    uint16_t flags;  // Flags
+    uint32_t ciaddr; // Client IP address
+    uint32_t yiaddr; // Your (client) IP address
+    uint32_t siaddr; // Next server IP address
+    uint32_t giaddr; // Relay agent IP address
+    uint8_t chaddr[16]; // Client hardware address
+    uint8_t sname[64];  // Server host name
+    uint8_t file[128];  // Boot file name
+    uint8_t options[312]; // Optional parameters
+};
+
 // Структура для фиксации IP адреса
 struct FixedIP {
   char mac[18];
@@ -41,6 +66,7 @@ struct DeviceInfo {
   float relYaw;
   unsigned long lastUpdate;
   bool connected;
+  unsigned long lastSeen;
 };
 
 // Структура для настроек сети
@@ -75,6 +101,13 @@ int fixedIPCount = 0;
 // Настройки сети
 NetworkSettings networkSettings;
 
+// DHCP пул адресов
+IPAddress dhcpStartIP;
+IPAddress dhcpEndIP;
+const int DHCP_POOL_SIZE = 50;
+bool dhcpLeases[DHCP_POOL_SIZE];
+String dhcpMacTable[DHCP_POOL_SIZE];
+
 // Время последнего сканирования
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 10000;
@@ -84,20 +117,796 @@ unsigned long lastEEPROMSave = 0;
 const unsigned long EEPROM_SAVE_INTERVAL = 5000;
 bool eepromDirty = false;
 
-// Вспомогательная функция для извлечения значения из строки
+// Время последней проверки восстановления
+unsigned long lastRecoveryCheck = 0;
+const unsigned long RECOVERY_CHECK_INTERVAL = 30000;
+
+// Флаги сбоев
+bool wifiFailure = false;
+bool memoryFailure = false;
+unsigned long lastRestartAttempt = 0;
+const unsigned long RESTART_INTERVAL = 60000;
+
+// Добавьте эту строку в раздел объявлений функций (примерно после строки 80):
+bool parseMPU6050Data(const String& message, char* deviceName, 
+                     float& pitch, float& roll, float& yaw,
+                     float& relPitch, float& relRoll, float& relYaw);
+                     
+// Вспомогательная функция для извлечения значения из строки с защитой от переполнения
 float extractValue(const String& message, const String& key) {
+  if (message.length() == 0 || key.length() == 0) return 0.0;
+  
   int keyPos = message.indexOf(key);
   if (keyPos == -1) return 0.0;
   
   int valueStart = keyPos + key.length();
+  if (valueStart >= message.length()) return 0.0;
+  
   int valueEnd = message.indexOf(',', valueStart);
   if (valueEnd == -1) valueEnd = message.length();
+  if (valueEnd > valueStart + 15) valueEnd = valueStart + 15; // Ограничение длины
   
   String valueStr = message.substring(valueStart, valueEnd);
   return valueStr.toFloat();
 }
 
-// Упрощенная HTML страница (старый функционал)
+// Безопасное копирование строк с проверкой границ
+void safeStrcpy(char* dest, const char* src, size_t destSize) {
+  if (dest == NULL || src == NULL || destSize == 0) return;
+  
+  size_t srcLen = strlen(src);
+  if (srcLen >= destSize) {
+    srcLen = destSize - 1;
+  }
+  
+  strncpy(dest, src, srcLen);
+  dest[srcLen] = '\0';
+}
+
+// Функция для поиска устройства в массиве
+int findDeviceByMAC(const char* mac) {
+  if (mac == NULL) return -1;
+  
+  for (int i = 0; i < deviceCount; i++) {
+    if (strcmp(devices[i].mac, mac) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для поиска устройства по IP
+int findDeviceByIP(const char* ip) {
+  if (ip == NULL) return -1;
+  
+  for (int i = 0; i < deviceCount; i++) {
+    if (strcmp(devices[i].ip, ip) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для поиска алиаса по MAC
+int findAliasByMAC(const char* mac) {
+  if (mac == NULL) return -1;
+  
+  for (int i = 0; i < aliasCount; i++) {
+    if (strcmp(deviceAliases[i].mac, mac) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для поиска фиксированного IP по MAC
+int findFixedIPByMAC(const char* mac) {
+  if (mac == NULL) return -1;
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    if (strcmp(fixedIPs[i].mac, mac) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Функция для получения отображаемого имени устройства
+String getDisplayName(const char* mac, const char* originalHostname) {
+  if (mac == NULL) return "Unknown";
+  
+  // Сначала ищем пользовательское имя
+  int aliasIndex = findAliasByMAC(mac);
+  if (aliasIndex != -1) {
+    return String(deviceAliases[aliasIndex].alias);
+  }
+  
+  // Если пользовательского имени нет, используем оригинальное
+  return originalHostname && strlen(originalHostname) > 0 ? String(originalHostname) : "Unknown";
+}
+
+// Функция для добавления нового устройства с защитой от переполнения
+bool addDevice(const char* ip, const char* mac, const char* hostname, int rssi) {
+  if (ip == NULL || mac == NULL) return false;
+  
+  // Проверяем длину входных данных
+  if (strlen(ip) >= 16 || strlen(mac) >= 18 || (hostname && strlen(hostname) >= 32)) {
+    Serial.println("Error: Input data too long for device structure");
+    return false;
+  }
+  
+  int index = findDeviceByMAC(mac);
+  
+  if (index == -1) {
+    if (deviceCount < MAX_DEVICES) {
+      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
+      safeStrcpy(devices[deviceCount].mac, mac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].originalMac, mac, sizeof(devices[deviceCount].originalMac));
+      
+      if (hostname && strlen(hostname) > 0) {
+        safeStrcpy(devices[deviceCount].hostname, hostname, sizeof(devices[deviceCount].hostname));
+      } else {
+        safeStrcpy(devices[deviceCount].hostname, "Unknown", sizeof(devices[deviceCount].hostname));
+      }
+      
+      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
+      devices[deviceCount].rssi = rssi;
+      
+      // Проверяем есть ли фиксированный IP для этого MAC
+      int fixedIndex = findFixedIPByMAC(mac);
+      devices[deviceCount].ipFixed = (fixedIndex != -1);
+      
+      devices[deviceCount].hasMPU6050 = false;
+      devices[deviceCount].pitch = 0;
+      devices[deviceCount].roll = 0;
+      devices[deviceCount].yaw = 0;
+      devices[deviceCount].relPitch = 0;
+      devices[deviceCount].relRoll = 0;
+      devices[deviceCount].relYaw = 0;
+      devices[deviceCount].lastUpdate = 0;
+      devices[deviceCount].connected = true;
+      devices[deviceCount].lastSeen = millis();
+      deviceCount++;
+      
+      Serial.printf("New device: %s (%s) - %s - RSSI: %d - IP Fixed: %s\n", 
+                   hostname ? hostname : "Unknown", ip, mac, rssi, devices[deviceCount-1].ipFixed ? "YES" : "NO");
+      return true;
+    } else {
+      Serial.println("Device limit reached!");
+      return false;
+    }
+  } else {
+    devices[index].rssi = rssi;
+    safeStrcpy(devices[index].ip, ip, sizeof(devices[index].ip));
+    devices[index].connected = true;
+    devices[index].lastSeen = millis();
+    if (hostname && strlen(hostname) > 0) {
+      safeStrcpy(devices[index].hostname, hostname, sizeof(devices[index].hostname));
+    }
+    return true;
+  }
+}
+
+// Функция для обновления данных MPU6050 от VR-клиента
+void updateVRDeviceData(const char* ip, const char* deviceName, 
+                       float pitch, float roll, float yaw,
+                       float relPitch, float relRoll, float relYaw) {
+  if (ip == NULL || deviceName == NULL) return;
+  
+  int index = findDeviceByIP(ip);
+  
+  if (index == -1) {
+    // Создаем новое устройство если не найдено
+    if (deviceCount < MAX_DEVICES) {
+      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
+      
+      char vrMac[32];
+      snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
+      safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
+      
+      safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
+      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
+      devices[deviceCount].ipFixed = false;
+      devices[deviceCount].hasMPU6050 = true;
+      devices[deviceCount].pitch = pitch;
+      devices[deviceCount].roll = roll;
+      devices[deviceCount].yaw = yaw;
+      devices[deviceCount].relPitch = relPitch;
+      devices[deviceCount].relRoll = relRoll;
+      devices[deviceCount].relYaw = relYaw;
+      devices[deviceCount].lastUpdate = millis();
+      devices[deviceCount].connected = true;
+      devices[deviceCount].lastSeen = millis();
+      deviceCount++;
+      
+      Serial.printf("New VR device: %s (%s) - Pitch: %.1f, Roll: %.1f, Yaw: %.1f\n", 
+                   deviceName, ip, pitch, roll, yaw);
+    } else {
+      Serial.println("Device limit reached! Cannot add new VR device");
+    }
+  } else {
+    // Обновляем существующее устройство
+    devices[index].hasMPU6050 = true;
+    devices[index].pitch = pitch;
+    devices[index].roll = roll;
+    devices[index].yaw = yaw;
+    devices[index].relPitch = relPitch;
+    devices[index].relRoll = relRoll;
+    devices[index].relYaw = relYaw;
+    devices[index].lastUpdate = millis();
+    devices[index].connected = true;
+    devices[index].lastSeen = millis();
+    
+    if (deviceName && strlen(deviceName) > 0) {
+      safeStrcpy(devices[index].hostname, deviceName, sizeof(devices[index].hostname));
+    }
+    
+    // Отправляем обновление через WebSocket всем веб-клиентам
+    DynamicJsonDocument doc(512);
+    if (doc.capacity() == 0) {
+      Serial.println("Error: Failed to allocate JSON document");
+      return;
+    }
+    
+    doc["type"] = "sensor_update";
+    JsonObject deviceObj = doc.createNestedObject("device");
+    deviceObj["ip"] = devices[index].ip;
+    deviceObj["hasMPU6050"] = devices[index].hasMPU6050;
+    deviceObj["pitch"] = devices[index].pitch;
+    deviceObj["roll"] = devices[index].roll;
+    deviceObj["yaw"] = devices[index].yaw;
+    deviceObj["relPitch"] = devices[index].relPitch;
+    deviceObj["relRoll"] = devices[index].relRoll;
+    deviceObj["relYaw"] = devices[index].relYaw;
+    
+    String json;
+    if (serializeJson(doc, json) == 0) {
+      Serial.println("Error: Failed to serialize JSON");
+    } else {
+      webSocketWeb.broadcastTXT(json);
+    }
+    
+    Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", ip, pitch, roll, yaw);
+  }
+}
+
+// Функция сканирования сети
+void scanNetwork() {
+  Serial.println("Starting network scan...");
+  
+  // Помечаем все устройства как отключенные
+  for (int i = 0; i < deviceCount; i++) {
+    devices[i].connected = false;
+  }
+  
+  // Проверяем активные подключения к точке доступа
+  struct station_info *station = wifi_softap_get_station_info();
+  while (station != NULL) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             station->bssid[0], station->bssid[1], station->bssid[2],
+             station->bssid[3], station->bssid[4], station->bssid[5]);
+    
+    char ip[16];
+    IPAddress ipAddr = IPAddress(station->ip);
+    snprintf(ip, sizeof(ip), "%d.%d.%d.%d", ipAddr[0], ipAddr[1], ipAddr[2], ipAddr[3]);
+    
+    // Используем фиксированное значение RSSI, так как структура не содержит эту информацию
+    addDevice(ip, mac, "WiFi Client", -50);
+    
+    station = STAILQ_NEXT(station, next);
+  }
+  wifi_softap_free_station_info();
+  
+  // Помечаем VR-устройства как онлайн если они обновлялись недавно
+  unsigned long currentTime = millis();
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].hasMPU6050 && (currentTime - devices[i].lastUpdate) < 30000) {
+      devices[i].connected = true;
+    }
+    
+    // Помечаем устройства как отключенные если не видели их больше минуты
+    if ((currentTime - devices[i].lastSeen) > 60000) {
+      devices[i].connected = false;
+    }
+  }
+  
+  Serial.printf("Scan complete. Found %d devices\n", deviceCount);
+  lastScanTime = millis();
+}
+
+// Инициализация DHCP сервера
+void initDHCPServer() {
+  int subnet = atoi(networkSettings.subnet);
+  if (subnet < 1 || subnet > 254) {
+    subnet = 50;
+  }
+  
+  dhcpStartIP = IPAddress(192, 168, subnet, 2);
+  dhcpEndIP = IPAddress(192, 168, subnet, 50);
+  
+  // Инициализация пула адресов
+  for (int i = 0; i < DHCP_POOL_SIZE; i++) {
+    dhcpLeases[i] = false;
+    dhcpMacTable[i] = "";
+  }
+  
+  // Запуск UDP сервера для DHCP
+  if (udp.begin(DHCP_SERVER_PORT)) {
+    Serial.println("DHCP Server started on port 67");
+  } else {
+    Serial.println("Failed to start DHCP server");
+  }
+}
+
+// Обработка DHCP запросов
+void handleDHCP() {
+  int packetSize = udp.parsePacket();
+  if (packetSize) {
+    if (packetSize >= sizeof(DHCPMessage)) {
+      Serial.println("DHCP packet too large");
+      return;
+    }
+    
+    DHCPMessage dhcpMsg;
+    udp.read((uint8_t*)&dhcpMsg, sizeof(DHCPMessage));
+    
+    // Определяем тип DHCP сообщения
+    uint8_t messageType = 0;
+    for (int i = 0; i < 312; i++) {
+      if (dhcpMsg.options[i] == 53) { // DHCP Message Type
+        messageType = dhcpMsg.options[i + 2];
+        break;
+      }
+    }
+    
+    if (messageType == 1) { // DHCP Discover
+      handleDHCPDiscover(dhcpMsg);
+    } else if (messageType == 3) { // DHCP Request
+      handleDHCPRequest(dhcpMsg);
+    }
+  }
+}
+
+// Обработка DHCP Discover
+void handleDHCPDiscover(DHCPMessage& discoverMsg) {
+  Serial.println("DHCP Discover received");
+  
+  // Ищем свободный IP в пуле
+  int freeIPIndex = -1;
+  String clientMAC = macToString(discoverMsg.chaddr);
+  
+  // Сначала проверяем, есть ли уже аренда для этого MAC
+  for (int i = 0; i < DHCP_POOL_SIZE; i++) {
+    if (dhcpMacTable[i] == clientMAC) {
+      freeIPIndex = i;
+      break;
+    }
+  }
+  
+  // Если нет, ищем свободный IP
+  if (freeIPIndex == -1) {
+    for (int i = 0; i < DHCP_POOL_SIZE; i++) {
+      if (!dhcpLeases[i]) {
+        freeIPIndex = i;
+        break;
+      }
+    }
+  }
+  
+  if (freeIPIndex != -1) {
+    // Отправляем DHCP Offer
+    sendDHCPOffer(discoverMsg, freeIPIndex);
+  }
+}
+
+// Обработка DHCP Request
+void handleDHCPRequest(DHCPMessage& requestMsg) {
+  Serial.println("DHCP Request received");
+  
+  String clientMAC = macToString(requestMsg.chaddr);
+  int subnet = atoi(networkSettings.subnet);
+  
+  // Отправляем DHCP Ack
+  sendDHCPAck(requestMsg, clientMAC);
+  
+  // Добавляем устройство в список
+  IPAddress clientIP = IPAddress(192, 168, subnet, getIPFromMAC(clientMAC));
+  addDevice(clientIP.toString().c_str(), clientMAC.c_str(), "DHCP Client", -50);
+}
+
+// Отправка DHCP Offer
+void sendDHCPOffer(DHCPMessage& discoverMsg, int ipIndex) {
+  DHCPMessage offerMsg;
+  memset(&offerMsg, 0, sizeof(DHCPMessage));
+  
+  offerMsg.op = 2; // BOOTREPLY
+  offerMsg.htype = 1; // Ethernet
+  offerMsg.hlen = 6;
+  offerMsg.xid = discoverMsg.xid;
+  
+  int subnet = atoi(networkSettings.subnet);
+  offerMsg.yiaddr = IPAddress(192, 168, subnet, ipIndex + 2).v4();
+  offerMsg.siaddr = WiFi.softAPIP().v4();
+  
+  memcpy(offerMsg.chaddr, discoverMsg.chaddr, 16);
+  strcpy((char*)offerMsg.sname, "ESP8266_DHCP");
+  
+  // Добавляем опции
+  int optIndex = 0;
+  offerMsg.options[optIndex++] = 53; // DHCP Message Type
+  offerMsg.options[optIndex++] = 1;
+  offerMsg.options[optIndex++] = 2; // Offer
+  
+  offerMsg.options[optIndex++] = 1; // Subnet Mask
+  offerMsg.options[optIndex++] = 4;
+  uint32_t subnetMask = IPAddress(255, 255, 255, 0).v4();
+  memcpy(&offerMsg.options[optIndex], &subnetMask, 4);
+  optIndex += 4;
+  
+  offerMsg.options[optIndex++] = 3; // Router
+  offerMsg.options[optIndex++] = 4;
+  uint32_t router = WiFi.softAPIP().v4();
+  memcpy(&offerMsg.options[optIndex], &router, 4);
+  optIndex += 4;
+  
+  offerMsg.options[optIndex++] = 51; // IP Lease Time
+  offerMsg.options[optIndex++] = 4;
+  uint32_t leaseTime = 3600; // 1 hour
+  memcpy(&offerMsg.options[optIndex], &leaseTime, 4);
+  optIndex += 4;
+  
+  offerMsg.options[optIndex++] = 54; // DHCP Server Identifier
+  offerMsg.options[optIndex++] = 4;
+  memcpy(&offerMsg.options[optIndex], &router, 4);
+  optIndex += 4;
+  
+  offerMsg.options[optIndex++] = 255; // End option
+  
+  // Отправка пакета
+  udp.beginPacket(IPAddress(255, 255, 255, 255), DHCP_CLIENT_PORT);
+  udp.write((uint8_t*)&offerMsg, sizeof(DHCPMessage));
+  udp.endPacket();
+  
+  // Резервируем IP
+  dhcpLeases[ipIndex] = true;
+  dhcpMacTable[ipIndex] = macToString(discoverMsg.chaddr);
+  
+  Serial.printf("DHCP Offer sent for IP: 192.168.%d.%d\n", subnet, ipIndex + 2);
+}
+
+// Отправка DHCP Ack
+void sendDHCPAck(DHCPMessage& requestMsg, const String& clientMAC) {
+  DHCPMessage ackMsg;
+  memset(&ackMsg, 0, sizeof(DHCPMessage));
+  
+  ackMsg.op = 2; // BOOTREPLY
+  ackMsg.htype = 1;
+  ackMsg.hlen = 6;
+  ackMsg.xid = requestMsg.xid;
+  
+  int subnet = atoi(networkSettings.subnet);
+  int clientIP = getIPFromMAC(clientMAC);
+  ackMsg.yiaddr = IPAddress(192, 168, subnet, clientIP).v4();
+  ackMsg.siaddr = WiFi.softAPIP().v4();
+  
+  memcpy(ackMsg.chaddr, requestMsg.chaddr, 16);
+  strcpy((char*)ackMsg.sname, "ESP8266_DHCP");
+  
+  // Добавляем опции
+  int optIndex = 0;
+  ackMsg.options[optIndex++] = 53; // DHCP Message Type
+  ackMsg.options[optIndex++] = 1;
+  ackMsg.options[optIndex++] = 5; // ACK
+  
+  ackMsg.options[optIndex++] = 1; // Subnet Mask
+  ackMsg.options[optIndex++] = 4;
+  uint32_t subnetMask = IPAddress(255, 255, 255, 0).v4();
+  memcpy(&ackMsg.options[optIndex], &subnetMask, 4);
+  optIndex += 4;
+  
+  ackMsg.options[optIndex++] = 3; // Router
+  ackMsg.options[optIndex++] = 4;
+  uint32_t router = WiFi.softAPIP().v4();
+  memcpy(&ackMsg.options[optIndex], &router, 4);
+  optIndex += 4;
+  
+  ackMsg.options[optIndex++] = 51; // IP Lease Time
+  ackMsg.options[optIndex++] = 4;
+  uint32_t leaseTime = 3600;
+  memcpy(&ackMsg.options[optIndex], &leaseTime, 4);
+  optIndex += 4;
+  
+  ackMsg.options[optIndex++] = 54; // DHCP Server Identifier
+  ackMsg.options[optIndex++] = 4;
+  memcpy(&ackMsg.options[optIndex], &router, 4);
+  optIndex += 4;
+  
+  ackMsg.options[optIndex++] = 255; // End option
+  
+  udp.beginPacket(IPAddress(255, 255, 255, 255), DHCP_CLIENT_PORT);
+  udp.write((uint8_t*)&ackMsg, sizeof(DHCPMessage));
+  udp.endPacket();
+  
+  Serial.printf("DHCP ACK sent for IP: 192.168.%d.%d to MAC: %s\n", subnet, clientIP, clientMAC.c_str());
+}
+
+// Вспомогательная функция для преобразования MAC в строку
+String macToString(uint8_t* mac) {
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(macStr);
+}
+
+// Получение IP из MAC
+int getIPFromMAC(const String& mac) {
+  for (int i = 0; i < DHCP_POOL_SIZE; i++) {
+    if (dhcpMacTable[i] == mac) {
+      return i + 2;
+    }
+  }
+  return -1;
+}
+
+// Функция для сохранения настроек сети в EEPROM
+void saveNetworkSettingsToEEPROM() {
+  EEPROM.begin(2048);
+  
+  int addr = 0;
+  EEPROM.write(addr++, networkSettings.configured ? 1 : 0);
+  
+  // Сохраняем SSID
+  size_t ssidLen = strlen(networkSettings.ssid);
+  if (ssidLen > 31) ssidLen = 31;
+  EEPROM.write(addr++, ssidLen);
+  for (size_t j = 0; j < ssidLen; j++) {
+    EEPROM.write(addr++, networkSettings.ssid[j]);
+  }
+  
+  // Сохраняем пароль
+  size_t passwordLen = strlen(networkSettings.password);
+  if (passwordLen > 31) passwordLen = 31;
+  EEPROM.write(addr++, passwordLen);
+  for (size_t j = 0; j < passwordLen; j++) {
+    EEPROM.write(addr++, networkSettings.password[j]);
+  }
+  
+  // Сохраняем подсеть
+  size_t subnetLen = strlen(networkSettings.subnet);
+  if (subnetLen > 3) subnetLen = 3;
+  EEPROM.write(addr++, subnetLen);
+  for (size_t j = 0; j < subnetLen; j++) {
+    EEPROM.write(addr++, networkSettings.subnet[j]);
+  }
+  
+  if (EEPROM.commit()) {
+    Serial.println("Network settings saved to EEPROM");
+  } else {
+    Serial.println("Error saving network settings to EEPROM");
+    memoryFailure = true;
+  }
+  EEPROM.end();
+}
+
+// Функция для загрузки настроек сети из EEPROM
+void loadNetworkSettingsFromEEPROM() {
+  EEPROM.begin(2048);
+  
+  int addr = 0;
+  networkSettings.configured = (EEPROM.read(addr++) == 1);
+  
+  if (networkSettings.configured) {
+    // Загружаем SSID
+    int ssidLen = EEPROM.read(addr++);
+    if (ssidLen > 31) ssidLen = 31;
+    for (int j = 0; j < ssidLen; j++) {
+      networkSettings.ssid[j] = EEPROM.read(addr++);
+    }
+    networkSettings.ssid[ssidLen] = '\0';
+    
+    // Загружаем пароль
+    int passwordLen = EEPROM.read(addr++);
+    if (passwordLen > 31) passwordLen = 31;
+    for (int j = 0; j < passwordLen; j++) {
+      networkSettings.password[j] = EEPROM.read(addr++);
+    }
+    networkSettings.password[passwordLen] = '\0';
+    
+    // Загружаем подсеть
+    int subnetLen = EEPROM.read(addr++);
+    if (subnetLen > 3) subnetLen = 3;
+    for (int j = 0; j < subnetLen; j++) {
+      networkSettings.subnet[j] = EEPROM.read(addr++);
+    }
+    networkSettings.subnet[subnetLen] = '\0';
+  } else {
+    // Значения по умолчанию
+    safeStrcpy(networkSettings.ssid, ap_ssid, sizeof(networkSettings.ssid));
+    safeStrcpy(networkSettings.password, ap_password, sizeof(networkSettings.password));
+    safeStrcpy(networkSettings.subnet, "50", sizeof(networkSettings.subnet));
+  }
+  
+  EEPROM.end();
+  
+  Serial.printf("Network settings loaded: SSID=%s, Subnet=%s\n", 
+                networkSettings.ssid, networkSettings.subnet);
+}
+
+// Функция для сохранения алиасов устройств в EEPROM
+void saveAliasesToEEPROM() {
+  EEPROM.begin(2048);
+  
+  int addr = 512;
+  EEPROM.write(addr++, aliasCount > MAX_ALIASES ? MAX_ALIASES : aliasCount);
+  
+  for (int i = 0; i < aliasCount && i < MAX_ALIASES; i++) {
+    // Сохраняем MAC
+    size_t macLen = strlen(deviceAliases[i].mac);
+    if (macLen > 17) macLen = 17;
+    EEPROM.write(addr++, macLen);
+    for (size_t j = 0; j < macLen; j++) {
+      EEPROM.write(addr++, deviceAliases[i].mac[j]);
+    }
+    
+    // Сохраняем алиас
+    size_t aliasLen = strlen(deviceAliases[i].alias);
+    if (aliasLen > 31) aliasLen = 31;
+    EEPROM.write(addr++, aliasLen);
+    for (size_t j = 0; j < aliasLen; j++) {
+      EEPROM.write(addr++, deviceAliases[i].alias[j]);
+    }
+  }
+  
+  // Сохраняем фиксированные IP
+  addr = 1024;
+  EEPROM.write(addr++, fixedIPCount > MAX_FIXED_IPS ? MAX_FIXED_IPS : fixedIPCount);
+  
+  for (int i = 0; i < fixedIPCount && i < MAX_FIXED_IPS; i++) {
+    // Сохраняем MAC
+    size_t macLen = strlen(fixedIPs[i].mac);
+    if (macLen > 17) macLen = 17;
+    EEPROM.write(addr++, macLen);
+    for (size_t j = 0; j < macLen; j++) {
+      EEPROM.write(addr++, fixedIPs[i].mac[j]);
+    }
+    
+    // Сохраняем IP
+    size_t ipLen = strlen(fixedIPs[i].ip);
+    if (ipLen > 15) ipLen = 15;
+    EEPROM.write(addr++, ipLen);
+    for (size_t j = 0; j < ipLen; j++) {
+      EEPROM.write(addr++, fixedIPs[i].ip[j]);
+    }
+  }
+  
+  if (EEPROM.commit()) {
+    Serial.println("Device aliases and fixed IPs saved to EEPROM");
+    eepromDirty = false;
+  } else {
+    Serial.println("Error saving aliases to EEPROM");
+    memoryFailure = true;
+  }
+  EEPROM.end();
+}
+
+// Функция для загрузки алиасов устройств из EEPROM
+void loadAliasesFromEEPROM() {
+  EEPROM.begin(2048);
+  
+  int addr = 512;
+  aliasCount = EEPROM.read(addr++);
+  
+  if (aliasCount > MAX_ALIASES) {
+    aliasCount = 0;
+  }
+  
+  for (int i = 0; i < aliasCount; i++) {
+    // Загружаем MAC
+    int macLen = EEPROM.read(addr++);
+    if (macLen > 17) macLen = 17;
+    for (int j = 0; j < macLen; j++) {
+      deviceAliases[i].mac[j] = EEPROM.read(addr++);
+    }
+    deviceAliases[i].mac[macLen] = '\0';
+    
+    // Загружаем алиас
+    int aliasLen = EEPROM.read(addr++);
+    if (aliasLen > 31) aliasLen = 31;
+    for (int j = 0; j < aliasLen; j++) {
+      deviceAliases[i].alias[j] = EEPROM.read(addr++);
+    }
+    deviceAliases[i].alias[aliasLen] = '\0';
+  }
+  
+  // Загружаем фиксированные IP
+  addr = 1024;
+  fixedIPCount = EEPROM.read(addr++);
+  
+  if (fixedIPCount > MAX_FIXED_IPS) {
+    fixedIPCount = 0;
+  }
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    // Загружаем MAC
+    int macLen = EEPROM.read(addr++);
+    if (macLen > 17) macLen = 17;
+    for (int j = 0; j < macLen; j++) {
+      fixedIPs[i].mac[j] = EEPROM.read(addr++);
+    }
+    fixedIPs[i].mac[macLen] = '\0';
+    
+    // Загружаем IP
+    int ipLen = EEPROM.read(addr++);
+    if (ipLen > 15) ipLen = 15;
+    for (int j = 0; j < ipLen; j++) {
+      fixedIPs[i].ip[j] = EEPROM.read(addr++);
+    }
+    fixedIPs[i].ip[ipLen] = '\0';
+  }
+  
+  EEPROM.end();
+  
+  Serial.printf("Loaded %d aliases and %d fixed IPs from EEPROM\n", aliasCount, fixedIPCount);
+}
+
+// Функция восстановления при сбоях
+void recoveryCheck() {
+  unsigned long currentTime = millis();
+  
+  // Проверяем сбои WiFi
+  if (wifiFailure) {
+    Serial.println("WiFi failure detected, attempting recovery...");
+    
+    // Перезапускаем точку доступа
+    WiFi.softAPdisconnect(true);
+    delay(1000);
+    
+    int subnet = atoi(networkSettings.subnet);
+    IPAddress local_ip(192, 168, subnet, 1);
+    IPAddress gateway(192, 168, subnet, 1);
+    IPAddress subnet_mask(255, 255, 255, 0);
+    
+    WiFi.softAPConfig(local_ip, gateway, subnet_mask);
+    
+    if (WiFi.softAP(networkSettings.ssid, networkSettings.password)) {
+      Serial.println("WiFi AP restarted successfully");
+      wifiFailure = false;
+    } else {
+      Serial.println("Failed to restart WiFi AP");
+    }
+  }
+  
+  // Проверяем сбои памяти
+  if (memoryFailure) {
+    Serial.println("Memory failure detected, attempting recovery...");
+    
+    // Перезапускаем EEPROM
+    EEPROM.begin(2048);
+    EEPROM.end();
+    
+    // Перезагружаем настройки
+    loadNetworkSettingsFromEEPROM();
+    loadAliasesFromEEPROM();
+    
+    memoryFailure = false;
+    Serial.println("Memory recovery completed");
+  }
+  
+  // Проверяем необходимость перезагрузки
+  if (currentTime - lastRestartAttempt > RESTART_INTERVAL) {
+    if (WiFi.status() != WL_CONNECTED && WiFi.softAPgetStationNum() == 0) {
+      Serial.println("System appears unstable, attempting restart...");
+      ESP.restart();
+    }
+    lastRestartAttempt = currentTime;
+  }
+  
+  lastRecoveryCheck = currentTime;
+}
+
+// ВАЖНО: Восстанавливаем оригинальную HTML страницу
 const char htmlPage[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -742,599 +1551,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// Функция для безопасного копирования строк
-void safeStrcpy(char* dest, const char* src, size_t destSize) {
-  if (destSize > 0) {
-    strncpy(dest, src, destSize - 1);
-    dest[destSize - 1] = '\0';
-  }
-}
-
-// Функция для поиска устройства в массиве
-int findDeviceByMAC(const char* mac) {
-  for (int i = 0; i < deviceCount; i++) {
-    if (strcmp(devices[i].mac, mac) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-// Функция для поиска устройства по IP
-int findDeviceByIP(const char* ip) {
-  for (int i = 0; i < deviceCount; i++) {
-    if (strcmp(devices[i].ip, ip) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-// Функция для поиска алиаса по MAC
-int findAliasByMAC(const char* mac) {
-  for (int i = 0; i < aliasCount; i++) {
-    if (strcmp(deviceAliases[i].mac, mac) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-// Функция для поиска фиксированного IP по MAC
-int findFixedIPByMAC(const char* mac) {
-  for (int i = 0; i < fixedIPCount; i++) {
-    if (strcmp(fixedIPs[i].mac, mac) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-// Функция для получения отображаемого имени устройства
-String getDisplayName(const char* mac, const char* originalHostname) {
-  // Сначала ищем пользовательское имя
-  int aliasIndex = findAliasByMAC(mac);
-  if (aliasIndex != -1) {
-    return String(deviceAliases[aliasIndex].alias);
-  }
-  
-  // Если пользовательского имени нет, используем оригинальное
-  return originalHostname && strlen(originalHostname) > 0 ? String(originalHostname) : "Unknown";
-}
-
-// Функция для добавления нового устройства
-void addDevice(const char* ip, const char* mac, const char* hostname, int rssi) {
-  int index = findDeviceByMAC(mac);
-  
-  if (index == -1) {
-    if (deviceCount < MAX_DEVICES) {
-      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
-      safeStrcpy(devices[deviceCount].mac, mac, sizeof(devices[deviceCount].mac));
-      safeStrcpy(devices[deviceCount].originalMac, mac, sizeof(devices[deviceCount].originalMac)); // Сохраняем оригинальный MAC
-      safeStrcpy(devices[deviceCount].hostname, hostname, sizeof(devices[deviceCount].hostname));
-      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
-      devices[deviceCount].rssi = rssi;
-      
-      // Проверяем есть ли фиксированный IP для этого MAC
-      int fixedIndex = findFixedIPByMAC(mac);
-      devices[deviceCount].ipFixed = (fixedIndex != -1);
-      
-      devices[deviceCount].hasMPU6050 = false;
-      devices[deviceCount].pitch = 0;
-      devices[deviceCount].roll = 0;
-      devices[deviceCount].yaw = 0;
-      devices[deviceCount].relPitch = 0;
-      devices[deviceCount].relRoll = 0;
-      devices[deviceCount].relYaw = 0;
-      devices[deviceCount].lastUpdate = 0;
-      devices[deviceCount].connected = true;
-      deviceCount++;
-      
-      Serial.printf("New device: %s (%s) - %s - RSSI: %d - IP Fixed: %s\n", 
-                   hostname, ip, mac, rssi, devices[deviceCount-1].ipFixed ? "YES" : "NO");
-    } else {
-      Serial.println("Device limit reached!");
-    }
-  } else {
-    devices[index].rssi = rssi;
-    safeStrcpy(devices[index].ip, ip, sizeof(devices[index].ip));
-    devices[index].connected = true;
-    if (hostname && strlen(hostname) > 0) {
-      safeStrcpy(devices[index].hostname, hostname, sizeof(devices[index].hostname));
-    }
-  }
-}
-
-// Функция для обновления данных MPU6050 от VR-клиента
-void updateVRDeviceData(const char* ip, const char* deviceName, 
-                       float pitch, float roll, float yaw,
-                       float relPitch, float relRoll, float relYaw) {
-  int index = findDeviceByIP(ip);
-  
-  if (index == -1) {
-    // Создаем новое устройство если не найдено
-    if (deviceCount < MAX_DEVICES) {
-      safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
-      
-      char vrMac[32];
-      snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
-      safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
-      safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
-      
-      safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
-      safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
-      // devices[deviceCount].rssi = -50;
-      devices[deviceCount].ipFixed = false; // VR устройства не фиксируем по IP
-      devices[deviceCount].hasMPU6050 = true;
-      devices[deviceCount].pitch = pitch;
-      devices[deviceCount].roll = roll;
-      devices[deviceCount].yaw = yaw;
-      devices[deviceCount].relPitch = relPitch;
-      devices[deviceCount].relRoll = relRoll;
-      devices[deviceCount].relYaw = relYaw;
-      devices[deviceCount].lastUpdate = millis();
-      devices[deviceCount].connected = true;
-      deviceCount++;
-      
-      Serial.printf("New VR device: %s (%s) - Pitch: %.1f, Roll: %.1f, Yaw: %.1f\n", 
-                   deviceName, ip, pitch, roll, yaw);
-    } else {
-      Serial.println("Device limit reached! Cannot add new VR device");
-    }
-  } else {
-    // Обновляем существующее устройство
-    devices[index].hasMPU6050 = true;
-    devices[index].pitch = pitch;
-    devices[index].roll = roll;
-    devices[index].yaw = yaw;
-    devices[index].relPitch = relPitch;
-    devices[index].relRoll = relRoll;
-    devices[index].relYaw = relYaw;
-    devices[index].lastUpdate = millis();
-    devices[index].connected = true;
-    
-    if (deviceName && strlen(deviceName) > 0) {
-      safeStrcpy(devices[index].hostname, deviceName, sizeof(devices[index].hostname));
-    }
-    
-    // Отправляем обновление через WebSocket всем веб-клиентам
-    DynamicJsonDocument doc(512);
-    doc["type"] = "sensor_update";
-    JsonObject deviceObj = doc.createNestedObject("device");
-    deviceObj["ip"] = devices[index].ip;
-    deviceObj["hasMPU6050"] = devices[index].hasMPU6050;
-    deviceObj["pitch"] = devices[index].pitch;
-    deviceObj["roll"] = devices[index].roll;
-    deviceObj["yaw"] = devices[index].yaw;
-    deviceObj["relPitch"] = devices[index].relPitch;
-    deviceObj["relRoll"] = devices[index].relRoll;
-    deviceObj["relYaw"] = devices[index].relYaw;
-    String json;
-    serializeJson(doc, json);
-    webSocketWeb.broadcastTXT(json);
-    Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", ip, pitch, roll, yaw);
-  }
-}
-
-// Упрощенная функция сканирования сети - возвращает тестовые данные
-void scanNetwork() {
-  Serial.println("Starting network scan...");
-  
-  // Помечаем все устройства как отключенные
-  for (int i = 0; i < deviceCount; i++) {
-    devices[i].connected = false;
-  }
-  
-  // Тестовые данные для демонстрации
-  // В реальной системе здесь должен быть код для сканирования сети
-  // addDevice("192.168.4.2", "aa:bb:cc:dd:ee:ff", "Test-Device-1", -45);
-  // addDevice("192.168.4.3", "11:22:33:44:55:66", "Test-Phone", -55);
-  
-  // Помечаем VR-устройства как онлайн если они обновлялись недавно
-  unsigned long currentTime = millis();
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].hasMPU6050 && (currentTime - devices[i].lastUpdate) < 30000) {
-      devices[i].connected = true;
-    }
-  }
-  
-  Serial.printf("Scan complete. Found %d devices\n", deviceCount);
-  lastScanTime = millis();
-}
-
-// Функция для сохранения настроек сети в EEPROM
-void saveNetworkSettingsToEEPROM() {
-  EEPROM.begin(2048); // Увеличиваем размер для фиксированных IP
-  
-  int addr = 0;
-  EEPROM.write(addr++, networkSettings.configured ? 1 : 0);
-  
-  // Сохраняем SSID
-  EEPROM.write(addr++, strlen(networkSettings.ssid));
-  for (size_t j = 0; j < strlen(networkSettings.ssid); j++) {
-    EEPROM.write(addr++, networkSettings.ssid[j]);
-  }
-  
-  // Сохраняем пароль
-  EEPROM.write(addr++, strlen(networkSettings.password));
-  for (size_t j = 0; j < strlen(networkSettings.password); j++) {
-    EEPROM.write(addr++, networkSettings.password[j]);
-  }
-  
-  // Сохраняем подсеть
-  EEPROM.write(addr++, strlen(networkSettings.subnet));
-  for (size_t j = 0; j < strlen(networkSettings.subnet); j++) {
-    EEPROM.write(addr++, networkSettings.subnet[j]);
-  }
-  
-  EEPROM.commit();
-  EEPROM.end();
-  
-  Serial.println("Network settings saved to EEPROM");
-}
-
-// Функция для загрузки настроек сети из EEPROM
-void loadNetworkSettingsFromEEPROM() {
-  EEPROM.begin(2048);
-  
-  int addr = 0;
-  networkSettings.configured = (EEPROM.read(addr++) == 1);
-  
-  if (networkSettings.configured) {
-    // Загружаем SSID
-    int ssidLen = EEPROM.read(addr++);
-    for (int j = 0; j < ssidLen && j < 31; j++) {
-      networkSettings.ssid[j] = EEPROM.read(addr++);
-    }
-    networkSettings.ssid[ssidLen] = '\0';
-    
-    // Загружаем пароль
-    int passwordLen = EEPROM.read(addr++);
-    for (int j = 0; j < passwordLen && j < 31; j++) {
-      networkSettings.password[j] = EEPROM.read(addr++);
-    }
-    networkSettings.password[passwordLen] = '\0';
-    
-    // Загружаем подсеть
-    int subnetLen = EEPROM.read(addr++);
-    for (int j = 0; j < subnetLen && j < 3; j++) {
-      networkSettings.subnet[j] = EEPROM.read(addr++);
-    }
-    networkSettings.subnet[subnetLen] = '\0';
-  } else {
-    // Значения по умолчанию
-    safeStrcpy(networkSettings.ssid, ap_ssid, sizeof(networkSettings.ssid));
-    safeStrcpy(networkSettings.password, ap_password, sizeof(networkSettings.password));
-    safeStrcpy(networkSettings.subnet, "50", sizeof(networkSettings.subnet));
-  }
-  
-  EEPROM.end();
-  
-  Serial.printf("Network settings loaded: SSID=%s, Subnet=%s\n", 
-                networkSettings.ssid, networkSettings.subnet);
-}
-
-// Функция для сохранения алиасов устройств в EEPROM
-void saveAliasesToEEPROM() {
-  EEPROM.begin(2048);
-  
-  int addr = 512; // Начинаем после сетевых настроек
-  EEPROM.write(addr++, aliasCount);
-  
-  for (int i = 0; i < aliasCount; i++) {
-    // Сохраняем MAC
-    EEPROM.write(addr++, strlen(deviceAliases[i].mac));
-    for (size_t j = 0; j < strlen(deviceAliases[i].mac); j++) {
-      EEPROM.write(addr++, deviceAliases[i].mac[j]);
-    }
-    
-    // Сохраняем алиас
-    EEPROM.write(addr++, strlen(deviceAliases[i].alias));
-    for (size_t j = 0; j < strlen(deviceAliases[i].alias); j++) {
-      EEPROM.write(addr++, deviceAliases[i].alias[j]);
-    }
-  }
-  
-  // Сохраняем фиксированные IP
-  addr = 1024; // Отдельная область для фиксированных IP
-  EEPROM.write(addr++, fixedIPCount);
-  
-  for (int i = 0; i < fixedIPCount; i++) {
-    // Сохраняем MAC
-    EEPROM.write(addr++, strlen(fixedIPs[i].mac));
-    for (size_t j = 0; j < strlen(fixedIPs[i].mac); j++) {
-      EEPROM.write(addr++, fixedIPs[i].mac[j]);
-    }
-    
-    // Сохраняем IP
-    EEPROM.write(addr++, strlen(fixedIPs[i].ip));
-    for (size_t j = 0; j < strlen(fixedIPs[i].ip); j++) {
-      EEPROM.write(addr++, fixedIPs[i].ip[j]);
-    }
-  }
-  
-  EEPROM.commit();
-  EEPROM.end();
-  
-  Serial.println("Device aliases and fixed IPs saved to EEPROM");
-  eepromDirty = false;
-}
-
-// Функция для загрузки алиасов устройств из EEPROM
-void loadAliasesFromEEPROM() {
-  EEPROM.begin(2048);
-  
-  int addr = 512;
-  aliasCount = EEPROM.read(addr++);
-  
-  if (aliasCount > MAX_ALIASES) {
-    aliasCount = 0;
-  }
-  
-  for (int i = 0; i < aliasCount; i++) {
-    // Загружаем MAC
-    int macLen = EEPROM.read(addr++);
-    for (int j = 0; j < macLen && j < 17; j++) {
-      deviceAliases[i].mac[j] = EEPROM.read(addr++);
-    }
-    deviceAliases[i].mac[macLen] = '\0';
-    
-    // Загружаем алиас
-    int aliasLen = EEPROM.read(addr++);
-    for (int j = 0; j < aliasLen && j < 31; j++) {
-      deviceAliases[i].alias[j] = EEPROM.read(addr++);
-    }
-    deviceAliases[i].alias[aliasLen] = '\0';
-  }
-  
-  // Загружаем фиксированные IP
-  addr = 1024;
-  fixedIPCount = EEPROM.read(addr++);
-  
-  if (fixedIPCount > MAX_FIXED_IPS) {
-    fixedIPCount = 0;
-  }
-  
-  for (int i = 0; i < fixedIPCount; i++) {
-    // Загружаем MAC
-    int macLen = EEPROM.read(addr++);
-    for (int j = 0; j < macLen && j < 17; j++) {
-      fixedIPs[i].mac[j] = EEPROM.read(addr++);
-    }
-    fixedIPs[i].mac[macLen] = '\0';
-    
-    // Загружаем IP
-    int ipLen = EEPROM.read(addr++);
-    for (int j = 0; j < ipLen && j < 15; j++) {
-      fixedIPs[i].ip[j] = EEPROM.read(addr++);
-    }
-    fixedIPs[i].ip[ipLen] = '\0';
-  }
-  
-  EEPROM.end();
-  
-  Serial.printf("Loaded %d device aliases and %d fixed IPs from EEPROM\n", aliasCount, fixedIPCount);
-}
-
-// Функция для очистки EEPROM
-void clearEEPROM() {
-  EEPROM.begin(2048);
-  for (int i = 0; i < 2048; i++) {
-    EEPROM.write(i, 0);
-  }
-  EEPROM.commit();
-  EEPROM.end();
-  Serial.println("EEPROM cleared successfully");
-}
-
-// Валидация WebSocket сообщений
-bool isValidWebSocketMessage(const String& message) {
-  // Проверяем длину сообщения
-  if (message.length() == 0 || message.length() > 512) {
-    return false;
-  }
-  
-  // Проверяем на наличие недопустимых символов
-  for (unsigned int i = 0; i < message.length(); i++) {
-    char c = message[i];
-    if (c < 32 && c != '\n' && c != '\r' && c != '\t') {
-      return false; // Управляющие символы
-    }
-    if (c > 126) {
-      return false; // Не-ASCII символы
-    }
-  }
-  
-  return true;
-}
-
-// Обработчик WebSocket событий для веб-клиентов
-void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("[WEB %u] Web Client Disconnected!\n", num);
-      break;
-      
-    case WStype_CONNECTED:
-      {
-        IPAddress ip = webSocketWeb.remoteIP(num);
-        Serial.printf("[WEB %u] Web Client Connected from %s\n", num, ip.toString().c_str());
-        
-        // Отправляем приветственное сообщение
-        String welcomeMsg = "{\"type\":\"connected\",\"message\":\"Real-time updates enabled\"}";
-        webSocketWeb.sendTXT(num, welcomeMsg);
-      }
-      break;
-      
-    case WStype_TEXT:
-      {
-        String message = String((char*)payload);
-        
-        // Валидация входящего сообщения
-        if (!isValidWebSocketMessage(message)) {
-          Serial.printf("[WEB %u] Invalid WebSocket message received\n", num);
-          webSocketWeb.sendTXT(num, "{\"type\":\"error\",\"message\":\"Invalid message\"}");
-          return;
-        }
-        
-        Serial.printf("[WEB %u] Received: %s\n", num, message.c_str());
-        
-        // Обработка команд от веб-клиентов
-        if (message == "get_devices") {
-          // Можно добавить отправку текущего состояния устройств
-        }
-      }
-      break;
-      
-    case WStype_ERROR:
-      Serial.printf("[WEB %u] WebSocket error\n", num);
-      break;
-  }
-}
-
-// Функция для парсинга данных MPU6050 из строки
-bool parseMPU6050Data(const String& message, char* deviceName, 
-                     float& pitch, float& roll, float& yaw,
-                     float& relPitch, float& relRoll, float& relYaw) {
-  // Пример формата: "DEVICE:VR-Head-Hom-001,PITCH:13.3,ROLL:5.7,YAW:-9.7,REL_PITCH:13.30,REL_ROLL:5.68,REL_YAW:-9.70,ACC_PITCH:13.30,ACC_ROLL:5.68,ACC_YAW:-9.70,ZERO_SET:false,TIMESTAMP:237540"
-  
-  if (!message.startsWith("DEVICE:")) {
-    return false;
-  }
-  
-  // Разбиваем сообщение на части
-  int startPos = 7; // После "DEVICE:"
-  int endPos = message.indexOf(',', startPos);
-  if (endPos == -1) return false;
-  
-  String deviceNameStr = message.substring(startPos, endPos);
-  safeStrcpy(deviceName, deviceNameStr.c_str(), 32);
-  
-  // Парсим основные значения
-  pitch = extractValue(message, "PITCH:");
-  roll = extractValue(message, "ROLL:");
-  yaw = extractValue(message, "YAW:");
-  relPitch = extractValue(message, "REL_PITCH:");
-  relRoll = extractValue(message, "REL_ROLL:");
-  relYaw = extractValue(message, "REL_YAW:");
-  
-  return true;
-}
-
-// Обработчик WebSocket событий для VR-клиентов
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
-    case WStype_DISCONNECTED:
-      Serial.printf("[VR %u] VR Client Disconnected!\n", num);
-      break;
-      
-    case WStype_CONNECTED:
-      {
-        IPAddress ip = webSocket.remoteIP(num);
-        Serial.printf("[VR %u] VR Client Connected from %s\n", num, ip.toString().c_str());
-        
-        // Отправляем приветственное сообщение
-        String welcomeMsg = "VR_SERVER:CONNECTED";
-        webSocket.sendTXT(num, welcomeMsg);
-      }
-      break;
-      
-    case WStype_TEXT:
-      {
-        String message = String((char*)payload);
-        IPAddress ip = webSocket.remoteIP(num);
-        
-        // Валидация входящего сообщения
-        if (!isValidWebSocketMessage(message)) {
-          Serial.printf("[VR %u] Invalid WebSocket message received\n", num);
-          webSocket.sendTXT(num, "ERROR:INVALID_MESSAGE");
-          return;
-        }
-        
-        Serial.printf("[VR %u] Received from VR Client: %s\n", num, message.c_str());
-        
-        // Обработка данных от VR-клиента
-        if (message.startsWith("DEVICE:")) {
-          char deviceName[32] = "";
-          float pitch = 0, roll = 0, yaw = 0;
-          float relPitch = 0, relRoll = 0, relYaw = 0;
-          
-          // Парсим данные MPU6050
-          if (parseMPU6050Data(message, deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw)) {
-            // Обновляем данные устройства
-            updateVRDeviceData(ip.toString().c_str(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
-            
-            // Отправляем подтверждение
-            String ackMsg = "DATA_RECEIVED";
-            webSocket.sendTXT(num, ackMsg);
-          } else {
-            Serial.println("Error parsing MPU6050 data");
-            webSocket.sendTXT(num, "ERROR:PARSING_FAILED");
-          }
-        }
-        else if (message == "PING") {
-          String pongMsg = "PONG";
-          webSocket.sendTXT(num, pongMsg);
-        }
-        else if (message.startsWith("DEVICE_CONNECTED:")) {
-          // Обработка подключения нового устройства
-          String deviceName = message.substring(17);
-          Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
-          String welcomeDeviceMsg = "WELCOME:" + deviceName;
-          webSocket.sendTXT(num, welcomeDeviceMsg);
-        }
-        else if (message == "CALIBRATION_COMPLETE") {
-          Serial.printf("[VR %u] Calibration completed\n", num);
-          // Можно добавить дополнительную логику при завершении калибровки
-        }
-        else if (message == "ANGLES_RESET") {
-          Serial.printf("[VR %u] Angles reset to zero\n", num);
-          // Можно добавить дополнительную логику при сбросе углов
-        }
-        else {
-          webSocket.sendTXT(num, "ERROR:UNKNOWN_COMMAND");
-        }
-      }
-      break;
-      
-    case WStype_ERROR:
-      Serial.printf("[VR %u] WebSocket error\n", num);
-      break;
-  }
-}
-
-// Настройка WiFi в режиме точки доступа
-void setupWiFiAP() {
-  Serial.println("Setting up Access Point...");
-  
-  WiFi.mode(WIFI_AP);
-  
-  // Конвертируем подсеть в число
-  int subnet = atoi(networkSettings.subnet);
-  if (subnet < 1 || subnet > 254) {
-    subnet = 50; // Значение по умолчанию при ошибке
-  }
-  
-  IPAddress local_ip(192, 168, subnet, 1);
-  IPAddress gateway(192, 168, subnet, 1);
-  IPAddress subnet_mask(255, 255, 255, 0);
-  
-  WiFi.softAP(networkSettings.ssid, networkSettings.password);
-  WiFi.softAPConfig(local_ip, gateway, subnet_mask);
-  
-  Serial.println("Access Point Started");
-  Serial.print("SSID: "); Serial.println(networkSettings.ssid);
-  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
-  Serial.printf("Subnet: 192.168.%d.0/24\n", subnet);
-}
-
-// Обработчик главной страницы
-void handleRoot() {
-  Serial.println("Serving HTML page...");
-  server.send_P(200, "text/html", htmlPage);
-}
-
-// API для получения списка устройств - ИСПРАВЛЕННАЯ ВЕРСИЯ
+// Восстанавливаем оригинальные обработчики API
 void handleApiDevices() {
   Serial.println("API devices requested");
   
@@ -1640,14 +1857,181 @@ void handleApiSettings() {
   }
 }
 
+// Восстанавливаем оригинальный обработчик главной страницы
+void handleRoot() {
+  Serial.println("Serving HTML page...");
+  server.send_P(200, "text/html", htmlPage);
+}
+
+// Восстанавливаем оригинальные WebSocket обработчики
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[VR %u] VR Client Disconnected!\n", num);
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[VR %u] VR Client Connected from %s\n", num, ip.toString().c_str());
+        
+        // Отправляем приветственное сообщение
+        String welcomeMsg = "VR_SERVER:CONNECTED";
+        webSocket.sendTXT(num, welcomeMsg);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        IPAddress ip = webSocket.remoteIP(num);
+        
+        Serial.printf("[VR %u] Received from VR Client: %s\n", num, message.c_str());
+        
+        // Обработка данных от VR-клиента
+        if (message.startsWith("DEVICE:")) {
+          char deviceName[32] = "";
+          float pitch = 0, roll = 0, yaw = 0;
+          float relPitch = 0, relRoll = 0, relYaw = 0;
+          
+          // Парсим данные MPU6050
+          if (parseMPU6050Data(message, deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw)) {
+            // Обновляем данные устройства
+            updateVRDeviceData(ip.toString().c_str(), deviceName, pitch, roll, yaw, relPitch, relRoll, relYaw);
+            
+            // Отправляем подтверждение
+            String ackMsg = "DATA_RECEIVED";
+            webSocket.sendTXT(num, ackMsg);
+          } else {
+            Serial.println("Error parsing MPU6050 data");
+            webSocket.sendTXT(num, "ERROR:PARSING_FAILED");
+          }
+        }
+        else if (message == "PING") {
+          String pongMsg = "PONG";
+          webSocket.sendTXT(num, pongMsg);
+        }
+        else if (message.startsWith("DEVICE_CONNECTED:")) {
+          // Обработка подключения нового устройства
+          String deviceName = message.substring(17);
+          Serial.printf("VR Device registered: %s from %s\n", deviceName.c_str(), ip.toString().c_str());
+          String welcomeDeviceMsg = "WELCOME:" + deviceName;
+          webSocket.sendTXT(num, welcomeDeviceMsg);
+        }
+        else if (message == "CALIBRATION_COMPLETE") {
+          Serial.printf("[VR %u] Calibration completed\n", num);
+        }
+        else if (message == "ANGLES_RESET") {
+          Serial.printf("[VR %u] Angles reset to zero\n", num);
+        }
+        else {
+          webSocket.sendTXT(num, "ERROR:UNKNOWN_COMMAND");
+        }
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.printf("[VR %u] WebSocket error\n", num);
+      break;
+  }
+}
+
+// Восстанавливаем функцию парсинга данных MPU6050
+bool parseMPU6050Data(const String& message, char* deviceName, 
+                     float& pitch, float& roll, float& yaw,
+                     float& relPitch, float& relRoll, float& relYaw) {
+  // Пример формата: "DEVICE:VR-Head-Hom-001,PITCH:13.3,ROLL:5.7,YAW:-9.7,REL_PITCH:13.30,REL_ROLL:5.68,REL_YAW:-9.70,ACC_PITCH:13.30,ACC_ROLL:5.68,ACC_YAW:-9.70,ZERO_SET:false,TIMESTAMP:237540"
+  
+  if (!message.startsWith("DEVICE:")) {
+    return false;
+  }
+  
+  // Разбиваем сообщение на части
+  int startPos = 7; // После "DEVICE:"
+  int endPos = message.indexOf(',', startPos);
+  if (endPos == -1) return false;
+  
+  String deviceNameStr = message.substring(startPos, endPos);
+  safeStrcpy(deviceName, deviceNameStr.c_str(), 32);
+  
+  // Парсим основные значения
+  pitch = extractValue(message, "PITCH:");
+  roll = extractValue(message, "ROLL:");
+  yaw = extractValue(message, "YAW:");
+  relPitch = extractValue(message, "REL_PITCH:");
+  relRoll = extractValue(message, "REL_ROLL:");
+  relYaw = extractValue(message, "REL_YAW:");
+  
+  return true;
+}
+
+// Восстанавливаем WebSocket обработчик для веб-клиентов
+void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[WEB %u] Web Client Disconnected!\n", num);
+      break;
+      
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocketWeb.remoteIP(num);
+        Serial.printf("[WEB %u] Web Client Connected from %s\n", num, ip.toString().c_str());
+        
+        // Отправляем приветственное сообщение
+        String welcomeMsg = "{\"type\":\"connected\",\"message\":\"Real-time updates enabled\"}";
+        webSocketWeb.sendTXT(num, welcomeMsg);
+      }
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        
+        Serial.printf("[WEB %u] Received: %s\n", num, message.c_str());
+        
+        // Обработка команд от веб-клиентов
+        if (message == "get_devices") {
+          // Можно добавить отправку текущего состояния устройств
+        }
+      }
+      break;
+      
+    case WStype_ERROR:
+      Serial.printf("[WEB %u] WebSocket error\n", num);
+      break;
+  }
+}
+
+// Восстанавливаем оригинальную настройку WiFi
+void setupWiFiAP() {
+  Serial.println("Setting up Access Point...");
+  
+  WiFi.mode(WIFI_AP);
+  
+  // Конвертируем подсеть в число
+  int subnet = atoi(networkSettings.subnet);
+  if (subnet < 1 || subnet > 254) {
+    subnet = 50; // Значение по умолчанию при ошибке
+  }
+  
+  IPAddress local_ip(192, 168, subnet, 1);
+  IPAddress gateway(192, 168, subnet, 1);
+  IPAddress subnet_mask(255, 255, 255, 0);
+  
+  WiFi.softAP(networkSettings.ssid, networkSettings.password);
+  WiFi.softAPConfig(local_ip, gateway, subnet_mask);
+  
+  Serial.println("Access Point Started");
+  Serial.print("SSID: "); Serial.println(networkSettings.ssid);
+  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
+  Serial.printf("Subnet: 192.168.%d.0/24\n", subnet);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
   Serial.println("\nStarting VR Tracking Server...");
-  
-  // Очистка EEPROM при первом запуске (раскомментировать для очистки)
-  // clearEEPROM();
   
   // Загрузка настроек сети из EEPROM
   loadNetworkSettingsFromEEPROM();
@@ -1657,6 +2041,9 @@ void setup() {
   
   // Настройка WiFi
   setupWiFiAP();
+  
+  // Инициализация DHCP сервера
+  initDHCPServer();
   
   // Настройка маршрутов сервера
   server.on("/", handleRoot);
@@ -1682,6 +2069,7 @@ void setup() {
   Serial.println("HTTP server started on port 80");
   Serial.println("WebSocket server for VR clients started on port 81");
   Serial.println("WebSocket server for web clients started on port 82");
+  Serial.println("DHCP server started on port 67");
   Serial.println("Ready to receive MPU6050 data from VR headsets!");
   
   // Первое сканирование
@@ -1695,6 +2083,9 @@ void loop() {
   webSocket.loop();
   webSocketWeb.loop();
   
+  // Обработка DHCP запросов
+  handleDHCP();
+  
   if (millis() - lastScanTime >= SCAN_INTERVAL) {
     scanNetwork();
   }
@@ -1702,6 +2093,11 @@ void loop() {
   // Буферизованное сохранение в EEPROM
   if (eepromDirty && (millis() - lastEEPROMSave >= EEPROM_SAVE_INTERVAL)) {
     saveAliasesToEEPROM();
+  }
+  
+  // Периодическая проверка восстановления
+  if (millis() - lastRecoveryCheck > RECOVERY_CHECK_INTERVAL) {
+    recoveryCheck();
   }
   
   delay(100);
