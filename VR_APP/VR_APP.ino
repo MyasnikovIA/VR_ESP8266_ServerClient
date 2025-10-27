@@ -4,6 +4,11 @@
 #include <EEPROM.h>
 #include <ArduinoJson.h>
 
+// CORS заголовки
+const char* cors_headers = "Access-Control-Allow-Origin: *\r\n"
+                          "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                          "Access-Control-Allow-Headers: Content-Type\r\n";
+
 // Настройки WiFi по умолчанию
 const char* ap_ssid = "ESP8266_Network_Monitor";
 const char* ap_password = "12345678";
@@ -302,8 +307,8 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
       
       char vrMac[32];
       snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
-      // safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
-      // safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
+      safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
       
       safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
       safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
@@ -371,7 +376,6 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
   }
 }
 
-// Функция сканирования сети
 // Функция сканирования сети
 void scanNetwork() {
   Serial.println("Starting network scan...");
@@ -921,6 +925,429 @@ void recoveryCheck() {
   }
   
   lastRecoveryCheck = currentTime;
+}
+
+// Обработчик OPTIONS запросов для CORS
+void handleOptions() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.send(200, "text/plain", "");
+}
+
+// Функция для отправки ответа с CORS заголовками
+void sendCORSResponse(int code, const String& content_type, const String& content) {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.send(code, content_type, content);
+}
+
+// API для получения списка устройств с CORS
+void handleApiDevices() {
+  Serial.println("API devices requested");
+  
+  DynamicJsonDocument doc(2048);
+  
+  // Временный массив для объединения устройств по IP
+  struct MergedDevice {
+    String ip;
+    bool processed;
+    int deviceIndex;
+  };
+  
+  MergedDevice mergedDevices[MAX_DEVICES];
+  int mergedCount = 0;
+  
+  // Сначала собираем все уникальные IP
+  for (int i = 0; i < deviceCount; i++) {
+    bool ipExists = false;
+    for (int j = 0; j < mergedCount; j++) {
+      if (mergedDevices[j].ip == devices[i].ip) {
+        ipExists = true;
+        break;
+      }
+    }
+    
+    if (!ipExists) {
+      mergedDevices[mergedCount].ip = devices[i].ip;
+      mergedDevices[mergedCount].processed = false;
+      mergedDevices[mergedCount].deviceIndex = i;
+      mergedCount++;
+    }
+  }
+  
+  // Теперь подсчитываем статистику на основе объединенных устройств
+  int onlineCount = 0;
+  int vrCount = 0;
+  int fixedCount = 0;
+  int actualDeviceCount = 0; // Реальное количество устройств после объединения
+  
+  JsonArray devicesArray = doc.createNestedArray("devices");
+  
+  // Обрабатываем каждый уникальный IP и считаем статистику
+  for (int i = 0; i < mergedCount; i++) {
+    if (mergedDevices[i].processed) continue;
+    
+    String currentIP = mergedDevices[i].ip;
+    actualDeviceCount++; // Увеличиваем счетчик реальных устройств
+    
+    // Ищем все устройства с этим IP
+    DeviceInfo* vrDevice = nullptr;
+    DeviceInfo* normalDevice = nullptr;
+    bool isOnline = false;
+    bool isVR = false;
+    bool isFixed = false;
+    
+    for (int j = 0; j < deviceCount; j++) {
+      if (String(devices[j].ip) == currentIP) {
+        if (devices[j].hasMPU6050) {
+          vrDevice = &devices[j];
+          isVR = true;
+          if (devices[j].connected) isOnline = true;
+        } else {
+          normalDevice = &devices[j];
+          if (devices[j].connected) isOnline = true;
+          if (devices[j].ipFixed) isFixed = true;
+        }
+        mergedDevices[i].processed = true;
+      }
+    }
+    
+    // Обновляем статистику
+    if (isOnline) onlineCount++;
+    if (isVR) vrCount++;
+    if (isFixed) fixedCount++;
+    
+    // Создаем объединенное устройство
+    JsonObject deviceObj = devicesArray.createNestedObject();
+    
+    if (vrDevice != nullptr) {
+      // Используем данные VR устройства как основу
+      deviceObj["ip"] = vrDevice->ip;
+      deviceObj["mac"] = vrDevice->mac;
+      deviceObj["originalMac"] = vrDevice->originalMac;
+      deviceObj["hostname"] = vrDevice->hostname;
+      deviceObj["displayName"] = getDisplayName(vrDevice->mac, vrDevice->hostname);
+      deviceObj["rssi"] = vrDevice->rssi;
+      deviceObj["ipFixed"] = vrDevice->ipFixed;
+      deviceObj["hasMPU6050"] = vrDevice->hasMPU6050;
+      deviceObj["connected"] = vrDevice->connected;
+      
+      // Данные сенсора
+      deviceObj["pitch"] = vrDevice->pitch;
+      deviceObj["roll"] = vrDevice->roll;
+      deviceObj["yaw"] = vrDevice->yaw;
+      deviceObj["relPitch"] = vrDevice->relPitch;
+      deviceObj["relRoll"] = vrDevice->relRoll;
+      deviceObj["relYaw"] = vrDevice->relYaw;
+      
+    } else if (normalDevice != nullptr) {
+      // Используем данные обычного устройства
+      deviceObj["ip"] = normalDevice->ip;
+      deviceObj["mac"] = normalDevice->mac;
+      deviceObj["originalMac"] = normalDevice->originalMac;
+      deviceObj["hostname"] = normalDevice->hostname;
+      deviceObj["displayName"] = getDisplayName(normalDevice->mac, normalDevice->hostname);
+      deviceObj["rssi"] = normalDevice->rssi;
+      deviceObj["ipFixed"] = normalDevice->ipFixed;
+      deviceObj["hasMPU6050"] = normalDevice->hasMPU6050;
+      deviceObj["connected"] = normalDevice->connected;
+    }
+    
+    // Если есть оба типа устройств, объединяем лучшие атрибуты
+    if (vrDevice != nullptr && normalDevice != nullptr) {
+      // Предпочитаем MAC адрес из нормального устройства (он настоящий)
+      if (strlen(normalDevice->mac) > 0) {
+        deviceObj["mac"] = normalDevice->mac;
+        deviceObj["originalMac"] = normalDevice->originalMac;
+      }
+      
+      // Предпочитаем настройки IP из нормального устройства
+      deviceObj["ipFixed"] = normalDevice->ipFixed;
+      
+      // Состояние подключения берем из VR устройства (оно более актуально)
+      deviceObj["connected"] = vrDevice->connected;
+      
+      Serial.printf("Merged devices for IP %s: VR + Normal\n", currentIP.c_str());
+    }
+  }
+  
+  // Используем ПЕРЕСЧИТАННЫЕ значения
+  doc["totalDevices"] = actualDeviceCount;        // После объединения дубликатов
+  doc["onlineDevices"] = onlineCount;             // Пересчитанные онлайн устройства
+  doc["vrDevices"] = vrCount;                     // Пересчитанные VR устройства
+  doc["fixedIPs"] = fixedCount;                   // Пересчитанные фиксированные IP
+  doc["espIp"] = WiFi.softAPIP().toString();
+  
+  String json;
+  serializeJson(doc, json);
+  
+  // Отправляем ответ с CORS заголовками
+  sendCORSResponse(200, "application/json", json);
+  
+  Serial.printf("API response: %d devices (after merging duplicates from %d original)\n", 
+                actualDeviceCount, deviceCount);
+  Serial.printf("Online: %d, VR: %d, Fixed IPs: %d\n", onlineCount, vrCount, fixedCount);
+}
+
+// API для калибровки датчика с CORS
+void handleApiCalibrate() {
+  if (server.method() == HTTP_POST) {
+    String ip = server.arg("ip");
+    Serial.printf("Calibration request for device: %s\n", ip.c_str());
+    
+    // Находим устройство по IP
+    int deviceIndex = findDeviceByIP(ip.c_str());
+    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
+      // Отправляем команду калибровки через WebSocket
+      bool commandSent = false;
+      for (int i = 0; i < webSocket.connectedClients(); i++) {
+        IPAddress clientIp = webSocket.remoteIP(i);
+        if (clientIp.toString() == ip) {
+          webSocket.sendTXT(i, "CALIBRATE_SENSOR");
+          commandSent = true;
+          Serial.printf("Calibration command sent to %s\n", ip.c_str());
+          break;
+        }
+      }
+      
+      if (commandSent) {
+        sendCORSResponse(200, "application/json", "{\"status\":\"success\",\"message\":\"Calibration command sent\"}");
+      } else {
+        sendCORSResponse(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
+      }
+    } else {
+      sendCORSResponse(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для сброса углов с CORS
+void handleApiReset() {
+  if (server.method() == HTTP_POST) {
+    String ip = server.arg("ip");
+    Serial.printf("Reset angles request for device: %s\n", ip.c_str());
+    
+    // Находим устройство по IP
+    int deviceIndex = findDeviceByIP(ip.c_str());
+    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
+      // Отправляем команду сброса через WebSocket
+      bool commandSent = false;
+      for (int i = 0; i < webSocket.connectedClients(); i++) {
+        IPAddress clientIp = webSocket.remoteIP(i);
+        if (clientIp.toString() == ip) {
+          webSocket.sendTXT(i, "RESET_ANGLES");
+          commandSent = true;
+          Serial.printf("Reset angles command sent to %s\n", ip.c_str());
+          break;
+        }
+      }
+      
+      if (commandSent) {
+        sendCORSResponse(200, "application/json", "{\"status\":\"success\",\"message\":\"Reset command sent\"}");
+      } else {
+        sendCORSResponse(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
+      }
+    } else {
+      sendCORSResponse(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для переименования устройства с CORS
+void handleApiRename() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    String name = server.arg("name");
+    
+    Serial.printf("Rename request - MAC: %s, Name: %s\n", mac.c_str(), name.c_str());
+    
+    if (mac.length() > 0 && name.length() > 0 && name.length() <= 30) {
+      // Ищем существующий алиас
+      int aliasIndex = findAliasByMAC(mac.c_str());
+      
+      if (aliasIndex != -1) {
+        // Обновляем существующий алиас
+        safeStrcpy(deviceAliases[aliasIndex].alias, name.c_str(), sizeof(deviceAliases[aliasIndex].alias));
+        Serial.printf("Updated alias for MAC %s: %s\n", mac.c_str(), name.c_str());
+      } else {
+        // Создаем новый алиас
+        if (aliasCount < MAX_ALIASES) {
+          safeStrcpy(deviceAliases[aliasCount].mac, mac.c_str(), sizeof(deviceAliases[aliasCount].mac));
+          safeStrcpy(deviceAliases[aliasCount].alias, name.c_str(), sizeof(deviceAliases[aliasCount].alias));
+          aliasCount++;
+          Serial.printf("Created new alias for MAC %s: %s\n", mac.c_str(), name.c_str());
+        } else {
+          sendCORSResponse(507, "application/json", "{\"status\":\"error\",\"message\":\"Alias limit reached\"}");
+          return;
+        }
+      }
+      
+      // Помечаем EEPROM как требующее сохранения
+      eepromDirty = true;
+      lastEEPROMSave = millis();
+      
+      sendCORSResponse(200, "application/json", "{\"status\":\"success\",\"message\":\"Device name saved\"}");
+      
+    } else {
+      sendCORSResponse(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для фиксации IP адреса с CORS
+void handleApiFixIP() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    String ip = server.arg("ip");
+    
+    Serial.printf("Fix IP request - MAC: %s, IP: %s\n", mac.c_str(), ip.c_str());
+    
+    if (mac.length() > 0 && ip.length() > 0) {
+      int ipNum = ip.toInt();
+      if (ipNum < 2 || ipNum > 254) {
+        sendCORSResponse(400, "application/json", "{\"status\":\"error\",\"message\":\"IP must be between 2 and 254\"}");
+        return;
+      }
+      
+      // Формируем полный IP адрес
+      int subnet = atoi(networkSettings.subnet);
+      char fullIP[16];
+      snprintf(fullIP, sizeof(fullIP), "192.168.%d.%s", subnet, ip.c_str());
+      
+      // Ищем существующую запись
+      int fixedIndex = findFixedIPByMAC(mac.c_str());
+      
+      if (fixedIndex != -1) {
+        // Обновляем существующую запись
+        safeStrcpy(fixedIPs[fixedIndex].ip, fullIP, sizeof(fixedIPs[fixedIndex].ip));
+        Serial.printf("Updated fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
+      } else {
+        // Создаем новую запись
+        if (fixedIPCount < MAX_FIXED_IPS) {
+          safeStrcpy(fixedIPs[fixedIPCount].mac, mac.c_str(), sizeof(fixedIPs[fixedIPCount].mac));
+          safeStrcpy(fixedIPs[fixedIPCount].ip, fullIP, sizeof(fixedIPs[fixedIPCount].ip));
+          fixedIPCount++;
+          Serial.printf("Created new fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
+        } else {
+          sendCORSResponse(507, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP limit reached\"}");
+          return;
+        }
+      }
+      
+      // Обновляем статус фиксации в устройствах
+      int deviceIndex = findDeviceByMAC(mac.c_str());
+      if (deviceIndex != -1) {
+        devices[deviceIndex].ipFixed = true;
+      }
+      
+      // Помечаем EEPROM как требующее сохранения
+      eepromDirty = true;
+      lastEEPROMSave = millis();
+      
+      sendCORSResponse(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address fixed. Device will get this IP on next connection.\"}");
+      
+    } else {
+      sendCORSResponse(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для снятия фиксации IP адреса с CORS
+void handleApiUnfixIP() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    
+    Serial.printf("Unfix IP request - MAC: %s\n", mac.c_str());
+    
+    if (mac.length() > 0) {
+      // Ищем запись
+      int fixedIndex = findFixedIPByMAC(mac.c_str());
+      
+      if (fixedIndex != -1) {
+        // Удаляем запись (сдвигаем массив)
+        for (int i = fixedIndex; i < fixedIPCount - 1; i++) {
+          memcpy(&fixedIPs[i], &fixedIPs[i + 1], sizeof(FixedIP));
+        }
+        fixedIPCount--;
+        Serial.printf("Removed fixed IP for MAC %s\n", mac.c_str());
+        
+        // Обновляем статус фиксации в устройствах
+        int deviceIndex = findDeviceByMAC(mac.c_str());
+        if (deviceIndex != -1) {
+          devices[deviceIndex].ipFixed = false;
+        }
+        
+        // Помечаем EEPROM как требующее сохранения
+        eepromDirty = true;
+        lastEEPROMSave = millis();
+        
+        sendCORSResponse(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address unfixed\"}");
+      } else {
+        sendCORSResponse(404, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP not found\"}");
+      }
+    } else {
+      sendCORSResponse(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для сохранения настроек с CORS
+void handleApiSettings() {
+  if (server.method() == HTTP_POST) {
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+    String subnet = server.arg("subnet");
+    
+    Serial.printf("Settings request - SSID: %s, Subnet: %s\n", ssid.c_str(), subnet.c_str());
+    
+    if (ssid.length() > 0 && password.length() >= 8 && subnet.length() > 0) {
+      // Сохраняем новые настройки
+      safeStrcpy(networkSettings.ssid, ssid.c_str(), sizeof(networkSettings.ssid));
+      safeStrcpy(networkSettings.password, password.c_str(), sizeof(networkSettings.password));
+      safeStrcpy(networkSettings.subnet, subnet.c_str(), sizeof(networkSettings.subnet));
+      networkSettings.configured = true;
+      
+      saveNetworkSettingsToEEPROM();
+      
+      sendCORSResponse(200, "application/json", "{\"status\":\"success\"}");
+      Serial.println("Settings saved successfully");
+      
+      // Перезагрузка для применения новых настроек
+      delay(1000);
+      ESP.restart();
+      
+    } else {
+      sendCORSResponse(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters - check SSID, password (min 8 chars) and subnet\"}");
+      Serial.println("Error: Invalid parameters");
+    }
+  } else if (server.method() == HTTP_OPTIONS) {
+    handleOptions();
+  } else {
+    sendCORSResponse(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+    Serial.println("Error: Method not allowed");
+  }
 }
 
 // ВАЖНО: Восстанавливаем оригинальную HTML страницу
@@ -1564,403 +1991,6 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// Восстанавливаем оригинальные обработчики API
-// API для получения списка устройств с объединением дубликатов по IP
-void handleApiDevices() {
-  Serial.println("API devices requested");
-  
-  DynamicJsonDocument doc(2048);
-  
-  // Временный массив для объединения устройств по IP
-  struct MergedDevice {
-    String ip;
-    bool processed;
-    int deviceIndex;
-  };
-  
-  MergedDevice mergedDevices[MAX_DEVICES];
-  int mergedCount = 0;
-  
-  // Сначала собираем все уникальные IP
-  for (int i = 0; i < deviceCount; i++) {
-    bool ipExists = false;
-    for (int j = 0; j < mergedCount; j++) {
-      if (mergedDevices[j].ip == devices[i].ip) {
-        ipExists = true;
-        break;
-      }
-    }
-    
-    if (!ipExists) {
-      mergedDevices[mergedCount].ip = devices[i].ip;
-      mergedDevices[mergedCount].processed = false;
-      mergedDevices[mergedCount].deviceIndex = i;
-      mergedCount++;
-    }
-  }
-  
-  // Теперь подсчитываем статистику на основе объединенных устройств
-  int onlineCount = 0;
-  int vrCount = 0;
-  int fixedCount = 0;
-  int actualDeviceCount = 0; // Реальное количество устройств после объединения
-  
-  JsonArray devicesArray = doc.createNestedArray("devices");
-  
-  // Обрабатываем каждый уникальный IP и считаем статистику
-  for (int i = 0; i < mergedCount; i++) {
-    if (mergedDevices[i].processed) continue;
-    
-    String currentIP = mergedDevices[i].ip;
-    actualDeviceCount++; // Увеличиваем счетчик реальных устройств
-    
-    // Ищем все устройства с этим IP
-    DeviceInfo* vrDevice = nullptr;
-    DeviceInfo* normalDevice = nullptr;
-    bool isOnline = false;
-    bool isVR = false;
-    bool isFixed = false;
-    
-    for (int j = 0; j < deviceCount; j++) {
-      if (String(devices[j].ip) == currentIP) {
-        if (devices[j].hasMPU6050) {
-          vrDevice = &devices[j];
-          isVR = true;
-          if (devices[j].connected) isOnline = true;
-        } else {
-          normalDevice = &devices[j];
-          if (devices[j].connected) isOnline = true;
-          if (devices[j].ipFixed) isFixed = true;
-        }
-        mergedDevices[i].processed = true;
-      }
-    }
-    
-    // Обновляем статистику
-    if (isOnline) onlineCount++;
-    if (isVR) vrCount++;
-    if (isFixed) fixedCount++;
-    
-    // Создаем объединенное устройство
-    JsonObject deviceObj = devicesArray.createNestedObject();
-    
-    if (vrDevice != nullptr) {
-      // Используем данные VR устройства как основу
-      deviceObj["ip"] = vrDevice->ip;
-      deviceObj["mac"] = vrDevice->mac;
-      deviceObj["originalMac"] = vrDevice->originalMac;
-      deviceObj["hostname"] = vrDevice->hostname;
-      deviceObj["displayName"] = getDisplayName(vrDevice->mac, vrDevice->hostname);
-      deviceObj["rssi"] = vrDevice->rssi;
-      deviceObj["ipFixed"] = vrDevice->ipFixed;
-      deviceObj["hasMPU6050"] = vrDevice->hasMPU6050;
-      deviceObj["connected"] = vrDevice->connected;
-      
-      // Данные сенсора
-      deviceObj["pitch"] = vrDevice->pitch;
-      deviceObj["roll"] = vrDevice->roll;
-      deviceObj["yaw"] = vrDevice->yaw;
-      deviceObj["relPitch"] = vrDevice->relPitch;
-      deviceObj["relRoll"] = vrDevice->relRoll;
-      deviceObj["relYaw"] = vrDevice->relYaw;
-      
-    } else if (normalDevice != nullptr) {
-      // Используем данные обычного устройства
-      deviceObj["ip"] = normalDevice->ip;
-      deviceObj["mac"] = normalDevice->mac;
-      deviceObj["originalMac"] = normalDevice->originalMac;
-      deviceObj["hostname"] = normalDevice->hostname;
-      deviceObj["displayName"] = getDisplayName(normalDevice->mac, normalDevice->hostname);
-      deviceObj["rssi"] = normalDevice->rssi;
-      deviceObj["ipFixed"] = normalDevice->ipFixed;
-      deviceObj["hasMPU6050"] = normalDevice->hasMPU6050;
-      deviceObj["connected"] = normalDevice->connected;
-    }
-    
-    // Если есть оба типа устройств, объединяем лучшие атрибуты
-    if (vrDevice != nullptr && normalDevice != nullptr) {
-      // Предпочитаем MAC адрес из нормального устройства (он настоящий)
-      if (strlen(normalDevice->mac) > 0) {
-        deviceObj["mac"] = normalDevice->mac;
-        deviceObj["originalMac"] = normalDevice->originalMac;
-      }
-      
-      // Предпочитаем настройки IP из нормального устройства
-      deviceObj["ipFixed"] = normalDevice->ipFixed;
-      
-      // Состояние подключения берем из VR устройства (оно более актуально)
-      deviceObj["connected"] = vrDevice->connected;
-      
-      Serial.printf("Merged devices for IP %s: VR + Normal\n", currentIP.c_str());
-    }
-  }
-  
-  // Используем ПЕРЕСЧИТАННЫЕ значения
-  doc["totalDevices"] = actualDeviceCount;        // После объединения дубликатов
-  doc["onlineDevices"] = onlineCount;             // Пересчитанные онлайн устройства
-  doc["vrDevices"] = vrCount;                     // Пересчитанные VR устройства
-  doc["fixedIPs"] = fixedCount;                   // Пересчитанные фиксированные IP
-  doc["espIp"] = WiFi.softAPIP().toString();
-  
-  String json;
-  serializeJson(doc, json);
-  server.send(200, "application/json", json);
-  
-  Serial.printf("API response: %d devices (after merging duplicates from %d original)\n", 
-                actualDeviceCount, deviceCount);
-  Serial.printf("Online: %d, VR: %d, Fixed IPs: %d\n", onlineCount, vrCount, fixedCount);
-}
-
-
-
-
-// API для калибровки датчика
-void handleApiCalibrate() {
-  if (server.method() == HTTP_POST) {
-    String ip = server.arg("ip");
-    Serial.printf("Calibration request for device: %s\n", ip.c_str());
-    
-    // Находим устройство по IP
-    int deviceIndex = findDeviceByIP(ip.c_str());
-    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
-      // Отправляем команду калибровки через WebSocket
-      bool commandSent = false;
-      for (int i = 0; i < webSocket.connectedClients(); i++) {
-        IPAddress clientIp = webSocket.remoteIP(i);
-        if (clientIp.toString() == ip) {
-          webSocket.sendTXT(i, "CALIBRATE_SENSOR");
-          commandSent = true;
-          Serial.printf("Calibration command sent to %s\n", ip.c_str());
-          break;
-        }
-      }
-      
-      if (commandSent) {
-        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Calibration command sent\"}");
-      } else {
-        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
-      }
-    } else {
-      server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
-}
-
-// API для сброса углов
-void handleApiReset() {
-  if (server.method() == HTTP_POST) {
-    String ip = server.arg("ip");
-    Serial.printf("Reset angles request for device: %s\n", ip.c_str());
-    
-    // Находим устройство по IP
-    int deviceIndex = findDeviceByIP(ip.c_str());
-    if (deviceIndex != -1 && devices[deviceIndex].hasMPU6050) {
-      // Отправляем команду сброса через WebSocket
-      bool commandSent = false;
-      for (int i = 0; i < webSocket.connectedClients(); i++) {
-        IPAddress clientIp = webSocket.remoteIP(i);
-        if (clientIp.toString() == ip) {
-          webSocket.sendTXT(i, "RESET_ANGLES");
-          commandSent = true;
-          Serial.printf("Reset angles command sent to %s\n", ip.c_str());
-          break;
-        }
-      }
-      
-      if (commandSent) {
-        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Reset command sent\"}");
-      } else {
-        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"VR device not connected\"}");
-      }
-    } else {
-      server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Device not found or not a VR device\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
-}
-
-// API для переименования устройства
-void handleApiRename() {
-  if (server.method() == HTTP_POST) {
-    String mac = server.arg("mac");
-    String name = server.arg("name");
-    
-    Serial.printf("Rename request - MAC: %s, Name: %s\n", mac.c_str(), name.c_str());
-    
-    if (mac.length() > 0 && name.length() > 0 && name.length() <= 30) {
-      // Ищем существующий алиас
-      int aliasIndex = findAliasByMAC(mac.c_str());
-      
-      if (aliasIndex != -1) {
-        // Обновляем существующий алиас
-        safeStrcpy(deviceAliases[aliasIndex].alias, name.c_str(), sizeof(deviceAliases[aliasIndex].alias));
-        Serial.printf("Updated alias for MAC %s: %s\n", mac.c_str(), name.c_str());
-      } else {
-        // Создаем новый алиас
-        if (aliasCount < MAX_ALIASES) {
-          safeStrcpy(deviceAliases[aliasCount].mac, mac.c_str(), sizeof(deviceAliases[aliasCount].mac));
-          safeStrcpy(deviceAliases[aliasCount].alias, name.c_str(), sizeof(deviceAliases[aliasCount].alias));
-          aliasCount++;
-          Serial.printf("Created new alias for MAC %s: %s\n", mac.c_str(), name.c_str());
-        } else {
-          server.send(507, "application/json", "{\"status\":\"error\",\"message\":\"Alias limit reached\"}");
-          return;
-        }
-      }
-      
-      // Помечаем EEPROM как требующее сохранения
-      eepromDirty = true;
-      lastEEPROMSave = millis();
-      
-      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Device name saved\"}");
-      
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
-}
-
-// API для фиксации IP адреса
-void handleApiFixIP() {
-  if (server.method() == HTTP_POST) {
-    String mac = server.arg("mac");
-    String ip = server.arg("ip");
-    
-    Serial.printf("Fix IP request - MAC: %s, IP: %s\n", mac.c_str(), ip.c_str());
-    
-    if (mac.length() > 0 && ip.length() > 0) {
-      int ipNum = ip.toInt();
-      if (ipNum < 2 || ipNum > 254) {
-        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"IP must be between 2 and 254\"}");
-        return;
-      }
-      
-      // Формируем полный IP адрес
-      int subnet = atoi(networkSettings.subnet);
-      char fullIP[16];
-      snprintf(fullIP, sizeof(fullIP), "192.168.%d.%s", subnet, ip.c_str());
-      
-      // Ищем существующую запись
-      int fixedIndex = findFixedIPByMAC(mac.c_str());
-      
-      if (fixedIndex != -1) {
-        // Обновляем существующую запись
-        safeStrcpy(fixedIPs[fixedIndex].ip, fullIP, sizeof(fixedIPs[fixedIndex].ip));
-        Serial.printf("Updated fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
-      } else {
-        // Создаем новую запись
-        if (fixedIPCount < MAX_FIXED_IPS) {
-          safeStrcpy(fixedIPs[fixedIPCount].mac, mac.c_str(), sizeof(fixedIPs[fixedIPCount].mac));
-          safeStrcpy(fixedIPs[fixedIPCount].ip, fullIP, sizeof(fixedIPs[fixedIPCount].ip));
-          fixedIPCount++;
-          Serial.printf("Created new fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
-        } else {
-          server.send(507, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP limit reached\"}");
-          return;
-        }
-      }
-      
-      // Обновляем статус фиксации в устройствах
-      int deviceIndex = findDeviceByMAC(mac.c_str());
-      if (deviceIndex != -1) {
-        devices[deviceIndex].ipFixed = true;
-      }
-      
-      // Помечаем EEPROM как требующее сохранения
-      eepromDirty = true;
-      lastEEPROMSave = millis();
-      
-      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address fixed. Device will get this IP on next connection.\"}");
-      
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
-}
-
-// API для снятия фиксации IP адреса
-void handleApiUnfixIP() {
-  if (server.method() == HTTP_POST) {
-    String mac = server.arg("mac");
-    
-    Serial.printf("Unfix IP request - MAC: %s\n", mac.c_str());
-    
-    if (mac.length() > 0) {
-      // Ищем запись
-      int fixedIndex = findFixedIPByMAC(mac.c_str());
-      
-      if (fixedIndex != -1) {
-        // Удаляем запись (сдвигаем массив)
-        for (int i = fixedIndex; i < fixedIPCount - 1; i++) {
-          memcpy(&fixedIPs[i], &fixedIPs[i + 1], sizeof(FixedIP));
-        }
-        fixedIPCount--;
-        Serial.printf("Removed fixed IP for MAC %s\n", mac.c_str());
-        
-        // Обновляем статус фиксации в устройствах
-        int deviceIndex = findDeviceByMAC(mac.c_str());
-        if (deviceIndex != -1) {
-          devices[deviceIndex].ipFixed = false;
-        }
-        
-        // Помечаем EEPROM как требующее сохранения
-        eepromDirty = true;
-        lastEEPROMSave = millis();
-        
-        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address unfixed\"}");
-      } else {
-        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP not found\"}");
-      }
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-  }
-}
-
-// API для сохранения настроек
-void handleApiSettings() {
-  if (server.method() == HTTP_POST) {
-    String ssid = server.arg("ssid");
-    String password = server.arg("password");
-    String subnet = server.arg("subnet");
-    
-    Serial.printf("Settings request - SSID: %s, Subnet: %s\n", ssid.c_str(), subnet.c_str());
-    
-    if (ssid.length() > 0 && password.length() >= 8 && subnet.length() > 0) {
-      // Сохраняем новые настройки
-      safeStrcpy(networkSettings.ssid, ssid.c_str(), sizeof(networkSettings.ssid));
-      safeStrcpy(networkSettings.password, password.c_str(), sizeof(networkSettings.password));
-      safeStrcpy(networkSettings.subnet, subnet.c_str(), sizeof(networkSettings.subnet));
-      networkSettings.configured = true;
-      
-      saveNetworkSettingsToEEPROM();
-      
-      server.send(200, "application/json", "{\"status\":\"success\"}");
-      Serial.println("Settings saved successfully");
-      
-      // Перезагрузка для применения новых настроек
-      delay(1000);
-      ESP.restart();
-      
-    } else {
-      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters - check SSID, password (min 8 chars) and subnet\"}");
-      Serial.println("Error: Invalid parameters");
-    }
-  } else {
-    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
-    Serial.println("Error: Method not allowed");
-  }
-}
-
 // Восстанавливаем оригинальный обработчик главной страницы
 void handleRoot() {
   Serial.println("Serving HTML page...");
@@ -2149,15 +2179,21 @@ void setup() {
   // Инициализация DHCP сервера
   initDHCPServer();
   
-  // Настройка маршрутов сервера
+  // Настройка маршрутов сервера с CORS поддержкой
   server.on("/", handleRoot);
   server.on("/api/devices", handleApiDevices);
   server.on("/api/calibrate", HTTP_POST, handleApiCalibrate);
+  server.on("/api/calibrate", HTTP_OPTIONS, handleOptions);
   server.on("/api/reset", HTTP_POST, handleApiReset);
+  server.on("/api/reset", HTTP_OPTIONS, handleOptions);
   server.on("/api/rename", HTTP_POST, handleApiRename);
+  server.on("/api/rename", HTTP_OPTIONS, handleOptions);
   server.on("/api/fixip", HTTP_POST, handleApiFixIP);
+  server.on("/api/fixip", HTTP_OPTIONS, handleOptions);
   server.on("/api/unfixip", HTTP_POST, handleApiUnfixIP);
+  server.on("/api/unfixip", HTTP_OPTIONS, handleOptions);
   server.on("/api/settings", HTTP_POST, handleApiSettings);
+  server.on("/api/settings", HTTP_OPTIONS, handleOptions);
   
   // Запуск сервера
   server.begin();
