@@ -17,10 +17,17 @@ WebSocketsServer webSocket = WebSocketsServer(81);
 // WebSocket сервер на порту 82 для веб-клиентов (обновление данных в реальном времени)
 WebSocketsServer webSocketWeb = WebSocketsServer(82);
 
+// Структура для фиксации IP адреса
+struct FixedIP {
+  char mac[18];
+  char ip[16];
+};
+
 // Структура для хранения информации об устройстве
 struct DeviceInfo {
   char ip[16];
   char mac[18];
+  char originalMac[18];  // Добавлено для отображения оригинального MAC
   char hostname[32];
   char customName[32];
   int rssi;
@@ -60,6 +67,11 @@ const int MAX_ALIASES = 30;
 DeviceAlias deviceAliases[MAX_ALIASES];
 int aliasCount = 0;
 
+// Массив для фиксированных IP адресов
+const int MAX_FIXED_IPS = 20;
+FixedIP fixedIPs[MAX_FIXED_IPS];
+int fixedIPCount = 0;
+
 // Настройки сети
 NetworkSettings networkSettings;
 
@@ -71,6 +83,19 @@ const unsigned long SCAN_INTERVAL = 10000;
 unsigned long lastEEPROMSave = 0;
 const unsigned long EEPROM_SAVE_INTERVAL = 5000;
 bool eepromDirty = false;
+
+// Вспомогательная функция для извлечения значения из строки
+float extractValue(const String& message, const String& key) {
+  int keyPos = message.indexOf(key);
+  if (keyPos == -1) return 0.0;
+  
+  int valueStart = keyPos + key.length();
+  int valueEnd = message.indexOf(',', valueStart);
+  if (valueEnd == -1) valueEnd = message.length();
+  
+  String valueStr = message.substring(valueStart, valueEnd);
+  return valueStr.toFloat();
+}
 
 // Упрощенная HTML страница (старый функционал)
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -91,6 +116,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .devices-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; margin-bottom: 15px; }
         .device-card { background: white; border: 1px solid #ddd; border-radius: 4px; padding: 8px; transition: all 0.3s; }
         .device-card.vr-device { border-left: 4px solid #e74c3c; background: #fff5f5; }
+        .device-card.ip-fixed { border-right: 4px solid #27ae60; background: #f8fff8; }
         .device-header { display: flex; justify-content: space-between; margin-bottom: 6px; }
         .device-name { font-weight: bold; color: #2c3e50; font-size: 14px; cursor: pointer; }
         .device-name:hover { color: #3498db; text-decoration: underline; }
@@ -108,6 +134,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .sensor-btn { padding: 3px 8px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 9px; flex: 1; }
         .sensor-btn.calibrate { background: #f39c12; }
         .sensor-btn.reset { background: #e74c3c; }
+        .ip-controls { display: flex; gap: 5px; margin-top: 5px; }
+        .ip-btn { padding: 3px 8px; border: none; border-radius: 3px; background: #9b59b6; color: white; cursor: pointer; font-size: 9px; flex: 1; }
+        .ip-btn.fix { background: #27ae60; }
+        .ip-btn.unfix { background: #e67e22; }
         .controls { text-align: center; margin: 10px 0; }
         .btn { padding: 5px 10px; margin: 2px; border: none; border-radius: 3px; background: #3498db; color: white; cursor: pointer; font-size: 10px; }
         .btn-settings { background: #34495e; }
@@ -124,13 +154,14 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; }
         .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 8px; border-radius: 3px; margin-bottom: 10px; font-size: 11px; color: #856404; }
         .vr-badge { background: #e74c3c; color: white; padding: 1px 4px; border-radius: 3px; font-size: 8px; margin-left: 5px; }
+        .fixed-badge { background: #27ae60; color: white; padding: 1px 4px; border-radius: 3px; font-size: 8px; margin-left: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1 style="margin:0;font-size:20px;">🎮 VR Tracking Server</h1>
-            <p style="margin:5px 0 0 0;font-size:12px;">Real-time MPU6050 device monitoring</p>
+            <p style="margin:5px 0 0 0;font-size:12px;">Real-time MPU6050 device monitoring with IP management</p>
         </div>
         
         <div class="stats">
@@ -145,6 +176,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             <div class="stat-card">
                 <div class="stat-number" id="vrDevices">0</div>
                 <div class="stat-label">VR Headsets</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="fixedIPs">0</div>
+                <div class="stat-label">Fixed IPs</div>
             </div>
             <div class="stat-card">
                 <div class="stat-number" id="espIp">-</div>
@@ -223,10 +258,42 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <!-- Modal for IP management -->
+    <div id="ipModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">🌐 Manage IP Address</div>
+                <span class="close" onclick="closeModal('ipModal')">&times;</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Device Name:</label>
+                <input type="text" id="ipDeviceName" class="form-input" readonly>
+            </div>
+            <div class="form-group">
+                <label class="form-label">MAC Address:</label>
+                <input type="text" id="ipMac" class="form-input" readonly>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Current IP:</label>
+                <input type="text" id="ipCurrent" class="form-input" readonly>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Fixed IP (2-254):</label>
+                <input type="number" id="ipFixed" class="form-input" min="2" max="254" placeholder="Enter fixed IP">
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeModal('ipModal')">Cancel</button>
+                <button class="btn" onclick="unfixIP()" id="unfixBtn">🔓 Unfix IP</button>
+                <button class="btn btn-settings" onclick="fixIP()">🔒 Fix IP</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let autoRefreshInterval = null;
         let webSocketClient = null;
         let currentEditMac = '';
+        let currentIPMac = '';
         
         function connectWebSocket() {
             const serverIp = document.getElementById('espIp').textContent;
@@ -330,6 +397,87 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             document.getElementById('renameNew').focus();
         }
         
+        function manageIP(mac, deviceName, currentIP, isFixed) {
+            currentIPMac = mac;
+            document.getElementById('ipDeviceName').value = deviceName;
+            document.getElementById('ipMac').value = mac;
+            document.getElementById('ipCurrent').value = currentIP;
+            
+            if (isFixed) {
+                const ipParts = currentIP.split('.');
+                document.getElementById('ipFixed').value = ipParts[3];
+                document.getElementById('unfixBtn').style.display = 'inline-block';
+            } else {
+                document.getElementById('ipFixed').value = '';
+                document.getElementById('unfixBtn').style.display = 'none';
+            }
+            
+            document.getElementById('ipModal').style.display = 'block';
+            document.getElementById('ipFixed').focus();
+        }
+        
+        function fixIP() {
+            const fixedIP = document.getElementById('ipFixed').value;
+            const mac = currentIPMac;
+            
+            if (!fixedIP || fixedIP < 2 || fixedIP > 254) {
+                alert('Please enter a valid IP address (2-254)');
+                return;
+            }
+            
+            fetch('/api/fixip', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'mac=' + encodeURIComponent(mac) + '&ip=' + encodeURIComponent(fixedIP)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    closeModal('ipModal');
+                    refreshData();
+                    alert('IP address fixed successfully! Device needs to reconnect.');
+                } else {
+                    alert('Ошибка: ' + (data.message || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Ошибка фиксации IP адреса');
+            });
+        }
+        
+        function unfixIP() {
+            const mac = currentIPMac;
+            
+            if (!confirm('Unfix IP address for this device?')) {
+                return;
+            }
+            
+            fetch('/api/unfixip', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'mac=' + encodeURIComponent(mac)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    closeModal('ipModal');
+                    refreshData();
+                    alert('IP address unfixed successfully!');
+                } else {
+                    alert('Ошибка: ' + (data.message || 'Неизвестная ошибка'));
+                }
+            })
+            .catch(e => {
+                console.error('Error:', e);
+                alert('Ошибка снятия фиксации IP адреса');
+            });
+        }
+        
         function saveDeviceName() {
             const newName = document.getElementById('renameNew').value.trim();
             const mac = currentEditMac;
@@ -390,6 +538,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             document.getElementById('totalDevices').textContent = data.totalDevices;
             document.getElementById('onlineDevices').textContent = data.onlineDevices;
             document.getElementById('vrDevices').textContent = data.vrDevices;
+            document.getElementById('fixedIPs').textContent = data.fixedIPs;
             document.getElementById('espIp').textContent = data.espIp;
             document.getElementById('updateTime').textContent = new Date().toLocaleTimeString();
             
@@ -401,11 +550,12 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             }
             
             container.innerHTML = data.devices.map(device => `
-                <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''}" data-ip="${device.ip}">
+                <div class="device-card ${device.hasMPU6050 ? 'vr-device' : ''} ${device.ipFixed ? 'ip-fixed' : ''}" data-ip="${device.ip}">
                     <div class="device-header">
                         <div class="device-name" onclick="editDeviceName('${device.mac}', '${device.displayName.replace(/'/g, "\\'")}')">
                             ${getDeviceIcon(device)} ${device.displayName}
                             ${device.hasMPU6050 ? '<span class="vr-badge">VR</span>' : ''}
+                            ${device.ipFixed ? '<span class="fixed-badge">FIXED</span>' : ''}
                         </div>
                         <div class="device-status ${device.connected ? 'status-online' : 'status-offline'}">
                             ${device.connected ? 'Online' : 'Offline'}
@@ -420,8 +570,17 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         <span class="info-value">${formatMac(device.mac)}</span>
                     </div>
                     <div class="info-row">
+                        <span class="info-label">Original MAC:</span>
+                        <span class="info-value">${formatMac(device.originalMac)}</span>
+                    </div>
+                    <div class="info-row">
                         <span class="info-label">Signal:</span>
                         <span class="info-value">${device.rssi} dBm</span>
+                    </div>
+                    <div class="ip-controls">
+                        <button class="ip-btn fix" onclick="manageIP('${device.mac}', '${device.displayName.replace(/'/g, "\\'")}', '${device.ip}', ${device.ipFixed})">
+                            ${device.ipFixed ? 'Change Fixed IP' : 'Fix IP Address'}
+                        </button>
                     </div>
                     ${device.hasMPU6050 ? `
                     <div class="sensor-data">
@@ -621,6 +780,16 @@ int findAliasByMAC(const char* mac) {
   return -1;
 }
 
+// Функция для поиска фиксированного IP по MAC
+int findFixedIPByMAC(const char* mac) {
+  for (int i = 0; i < fixedIPCount; i++) {
+    if (strcmp(fixedIPs[i].mac, mac) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // Функция для получения отображаемого имени устройства
 String getDisplayName(const char* mac, const char* originalHostname) {
   // Сначала ищем пользовательское имя
@@ -641,10 +810,15 @@ void addDevice(const char* ip, const char* mac, const char* hostname, int rssi) 
     if (deviceCount < MAX_DEVICES) {
       safeStrcpy(devices[deviceCount].ip, ip, sizeof(devices[deviceCount].ip));
       safeStrcpy(devices[deviceCount].mac, mac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].originalMac, mac, sizeof(devices[deviceCount].originalMac)); // Сохраняем оригинальный MAC
       safeStrcpy(devices[deviceCount].hostname, hostname, sizeof(devices[deviceCount].hostname));
       safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
       devices[deviceCount].rssi = rssi;
-      devices[deviceCount].ipFixed = false;
+      
+      // Проверяем есть ли фиксированный IP для этого MAC
+      int fixedIndex = findFixedIPByMAC(mac);
+      devices[deviceCount].ipFixed = (fixedIndex != -1);
+      
       devices[deviceCount].hasMPU6050 = false;
       devices[deviceCount].pitch = 0;
       devices[deviceCount].roll = 0;
@@ -656,8 +830,8 @@ void addDevice(const char* ip, const char* mac, const char* hostname, int rssi) 
       devices[deviceCount].connected = true;
       deviceCount++;
       
-      Serial.printf("New device: %s (%s) - %s - RSSI: %d\n", 
-                   hostname, ip, mac, rssi);
+      Serial.printf("New device: %s (%s) - %s - RSSI: %d - IP Fixed: %s\n", 
+                   hostname, ip, mac, rssi, devices[deviceCount-1].ipFixed ? "YES" : "NO");
     } else {
       Serial.println("Device limit reached!");
     }
@@ -685,11 +859,12 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
       char vrMac[32];
       snprintf(vrMac, sizeof(vrMac), "VR:%s", deviceName);
       safeStrcpy(devices[deviceCount].mac, vrMac, sizeof(devices[deviceCount].mac));
+      safeStrcpy(devices[deviceCount].originalMac, vrMac, sizeof(devices[deviceCount].originalMac));
       
       safeStrcpy(devices[deviceCount].hostname, deviceName, sizeof(devices[deviceCount].hostname));
       safeStrcpy(devices[deviceCount].customName, "", sizeof(devices[deviceCount].customName));
-      devices[deviceCount].rssi = -50;
-      devices[deviceCount].ipFixed = false;
+      // devices[deviceCount].rssi = -50;
+      devices[deviceCount].ipFixed = false; // VR устройства не фиксируем по IP
       devices[deviceCount].hasMPU6050 = true;
       devices[deviceCount].pitch = pitch;
       devices[deviceCount].roll = roll;
@@ -734,63 +909,42 @@ void updateVRDeviceData(const char* ip, const char* deviceName,
     deviceObj["relPitch"] = devices[index].relPitch;
     deviceObj["relRoll"] = devices[index].relRoll;
     deviceObj["relYaw"] = devices[index].relYaw;
-    
     String json;
     serializeJson(doc, json);
     webSocketWeb.broadcastTXT(json);
-    
-    Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", 
-                 ip, pitch, roll, yaw);
+    Serial.printf("VR data updated for %s: Pitch=%.1f, Roll=%.1f, Yaw=%.1f\n", ip, pitch, roll, yaw);
   }
 }
 
-// Функция для сканирования сети
+// Упрощенная функция сканирования сети - возвращает тестовые данные
 void scanNetwork() {
-  struct station_info *station = wifi_softap_get_station_info();
-  int onlineCount = 0;
+  Serial.println("Starting network scan...");
   
   // Помечаем все устройства как отключенные
   for (int i = 0; i < deviceCount; i++) {
     devices[i].connected = false;
   }
   
-  while (station != NULL) {
-    char ip[16];
-    snprintf(ip, sizeof(ip), "%d.%d.%d.%d", 
-             station->ip.addr & 0xFF,
-             (station->ip.addr >> 8) & 0xFF,
-             (station->ip.addr >> 16) & 0xFF,
-             (station->ip.addr >> 24) & 0xFF);
-    
-    char mac[18];
-    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-             station->bssid[0], station->bssid[1], station->bssid[2],
-             station->bssid[3], station->bssid[4], station->bssid[5]);
-    
-    addDevice(ip, mac, "", -50);
-    onlineCount++;
-    
-    station = STAILQ_NEXT(station, next);
-  }
-  
-  wifi_softap_free_station_info();
+  // Тестовые данные для демонстрации
+  // В реальной системе здесь должен быть код для сканирования сети
+  // addDevice("192.168.4.2", "aa:bb:cc:dd:ee:ff", "Test-Device-1", -45);
+  // addDevice("192.168.4.3", "11:22:33:44:55:66", "Test-Phone", -55);
   
   // Помечаем VR-устройства как онлайн если они обновлялись недавно
   unsigned long currentTime = millis();
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].hasMPU6050 && (currentTime - devices[i].lastUpdate) < 30000) {
       devices[i].connected = true;
-      onlineCount++;
     }
   }
   
-  Serial.printf("Scan complete. Found %d online devices\n", onlineCount);
+  Serial.printf("Scan complete. Found %d devices\n", deviceCount);
   lastScanTime = millis();
 }
 
 // Функция для сохранения настроек сети в EEPROM
 void saveNetworkSettingsToEEPROM() {
-  EEPROM.begin(512);
+  EEPROM.begin(2048); // Увеличиваем размер для фиксированных IP
   
   int addr = 0;
   EEPROM.write(addr++, networkSettings.configured ? 1 : 0);
@@ -821,7 +975,7 @@ void saveNetworkSettingsToEEPROM() {
 
 // Функция для загрузки настроек сети из EEPROM
 void loadNetworkSettingsFromEEPROM() {
-  EEPROM.begin(512);
+  EEPROM.begin(2048);
   
   int addr = 0;
   networkSettings.configured = (EEPROM.read(addr++) == 1);
@@ -862,7 +1016,7 @@ void loadNetworkSettingsFromEEPROM() {
 
 // Функция для сохранения алиасов устройств в EEPROM
 void saveAliasesToEEPROM() {
-  EEPROM.begin(1024); // Увеличиваем размер для алиасов
+  EEPROM.begin(2048);
   
   int addr = 512; // Начинаем после сетевых настроек
   EEPROM.write(addr++, aliasCount);
@@ -881,24 +1035,40 @@ void saveAliasesToEEPROM() {
     }
   }
   
+  // Сохраняем фиксированные IP
+  addr = 1024; // Отдельная область для фиксированных IP
+  EEPROM.write(addr++, fixedIPCount);
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    // Сохраняем MAC
+    EEPROM.write(addr++, strlen(fixedIPs[i].mac));
+    for (size_t j = 0; j < strlen(fixedIPs[i].mac); j++) {
+      EEPROM.write(addr++, fixedIPs[i].mac[j]);
+    }
+    
+    // Сохраняем IP
+    EEPROM.write(addr++, strlen(fixedIPs[i].ip));
+    for (size_t j = 0; j < strlen(fixedIPs[i].ip); j++) {
+      EEPROM.write(addr++, fixedIPs[i].ip[j]);
+    }
+  }
+  
   EEPROM.commit();
   EEPROM.end();
   
-  Serial.println("Device aliases saved to EEPROM");
+  Serial.println("Device aliases and fixed IPs saved to EEPROM");
   eepromDirty = false;
 }
 
 // Функция для загрузки алиасов устройств из EEPROM
 void loadAliasesFromEEPROM() {
-  EEPROM.begin(1024);
+  EEPROM.begin(2048);
   
   int addr = 512;
   aliasCount = EEPROM.read(addr++);
   
   if (aliasCount > MAX_ALIASES) {
     aliasCount = 0;
-    EEPROM.end();
-    return;
   }
   
   for (int i = 0; i < aliasCount; i++) {
@@ -917,15 +1087,39 @@ void loadAliasesFromEEPROM() {
     deviceAliases[i].alias[aliasLen] = '\0';
   }
   
+  // Загружаем фиксированные IP
+  addr = 1024;
+  fixedIPCount = EEPROM.read(addr++);
+  
+  if (fixedIPCount > MAX_FIXED_IPS) {
+    fixedIPCount = 0;
+  }
+  
+  for (int i = 0; i < fixedIPCount; i++) {
+    // Загружаем MAC
+    int macLen = EEPROM.read(addr++);
+    for (int j = 0; j < macLen && j < 17; j++) {
+      fixedIPs[i].mac[j] = EEPROM.read(addr++);
+    }
+    fixedIPs[i].mac[macLen] = '\0';
+    
+    // Загружаем IP
+    int ipLen = EEPROM.read(addr++);
+    for (int j = 0; j < ipLen && j < 15; j++) {
+      fixedIPs[i].ip[j] = EEPROM.read(addr++);
+    }
+    fixedIPs[i].ip[ipLen] = '\0';
+  }
+  
   EEPROM.end();
   
-  Serial.printf("Loaded %d device aliases from EEPROM\n", aliasCount);
+  Serial.printf("Loaded %d device aliases and %d fixed IPs from EEPROM\n", aliasCount, fixedIPCount);
 }
 
 // Функция для очистки EEPROM
 void clearEEPROM() {
-  EEPROM.begin(1024);
-  for (int i = 0; i < 1024; i++) {
+  EEPROM.begin(2048);
+  for (int i = 0; i < 2048; i++) {
     EEPROM.write(i, 0);
   }
   EEPROM.commit();
@@ -997,21 +1191,6 @@ void webSocketWebEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t len
       break;
   }
 }
-
-
-// Вспомогательная функция для извлечения значения из строки
-float extractValue(const String& message, const String& key) {
-  int keyPos = message.indexOf(key);
-  if (keyPos == -1) return 0.0;
-  
-  int valueStart = keyPos + key.length();
-  int valueEnd = message.indexOf(',', valueStart);
-  if (valueEnd == -1) valueEnd = message.length();
-  
-  String valueStr = message.substring(valueStart, valueEnd);
-  return valueStr.toFloat();
-}
-
 
 // Функция для парсинга данных MPU6050 из строки
 bool parseMPU6050Data(const String& message, char* deviceName, 
@@ -1146,6 +1325,7 @@ void setupWiFiAP() {
   Serial.println("Access Point Started");
   Serial.print("SSID: "); Serial.println(networkSettings.ssid);
   Serial.print("IP: "); Serial.println(WiFi.softAPIP());
+  Serial.printf("Subnet: 192.168.%d.0/24\n", subnet);
 }
 
 // Обработчик главной страницы
@@ -1154,97 +1334,63 @@ void handleRoot() {
   server.send_P(200, "text/html", htmlPage);
 }
 
-// API для получения списка устройств
+// API для получения списка устройств - ИСПРАВЛЕННАЯ ВЕРСИЯ
 void handleApiDevices() {
   Serial.println("API devices requested");
   
   DynamicJsonDocument doc(2048);
   
-  // Создаем массив для хранения уникальных устройств
-  DeviceInfo uniqueDevices[MAX_DEVICES];
-  int uniqueCount = 0;
-  
-  // Сначала проходим по всем устройствам и собираем устройства с MPU6050
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].hasMPU6050) {
-      if (uniqueCount < MAX_DEVICES) {
-        bool exists = false;
-        for (int j = 0; j < uniqueCount; j++) {
-          if (strcmp(uniqueDevices[j].ip, devices[i].ip) == 0) {
-            exists = true;
-            break;
-          }
-        }
-        if (!exists) {
-          memcpy(&uniqueDevices[uniqueCount], &devices[i], sizeof(DeviceInfo));
-          uniqueCount++;
-        }
-      }
-    }
-  }
-  
-  // Затем добавляем устройства без MPU6050
-  for (int i = 0; i < deviceCount; i++) {
-    if (!devices[i].hasMPU6050) {
-      if (uniqueCount < MAX_DEVICES) {
-        bool exists = false;
-        for (int j = 0; j < uniqueCount; j++) {
-          if (strcmp(uniqueDevices[j].ip, devices[i].ip) == 0) {
-            exists = true;
-            break;
-          }
-        }
-        if (!exists) {
-          memcpy(&uniqueDevices[uniqueCount], &devices[i], sizeof(DeviceInfo));
-          uniqueCount++;
-        }
-      }
-    }
-  }
-  
-  // Подсчет онлайн устройств и VR-устройств среди уникальных
+  // Подсчет статистики
   int onlineCount = 0;
   int vrCount = 0;
-  for (int i = 0; i < uniqueCount; i++) {
-    if (uniqueDevices[i].connected) {
+  int fixedCount = 0;
+  
+  for (int i = 0; i < deviceCount; i++) {
+    if (devices[i].connected) {
       onlineCount++;
     }
-    if (uniqueDevices[i].hasMPU6050) {
+    if (devices[i].hasMPU6050) {
       vrCount++;
+    }
+    if (devices[i].ipFixed) {
+      fixedCount++;
     }
   }
   
-  doc["totalDevices"] = uniqueCount;
+  doc["totalDevices"] = deviceCount;
   doc["onlineDevices"] = onlineCount;
   doc["vrDevices"] = vrCount;
+  doc["fixedIPs"] = fixedCount;
   doc["espIp"] = WiFi.softAPIP().toString();
   
   JsonArray devicesArray = doc.createNestedArray("devices");
   
-  for (int i = 0; i < uniqueCount; i++) {
+  for (int i = 0; i < deviceCount; i++) {
     JsonObject deviceObj = devicesArray.createNestedObject();
-    deviceObj["ip"] = uniqueDevices[i].ip;
-    deviceObj["mac"] = uniqueDevices[i].mac;
-    deviceObj["hostname"] = uniqueDevices[i].hostname;
-    deviceObj["displayName"] = getDisplayName(uniqueDevices[i].mac, uniqueDevices[i].hostname);
-    deviceObj["rssi"] = uniqueDevices[i].rssi;
-    deviceObj["ipFixed"] = uniqueDevices[i].ipFixed;
-    deviceObj["hasMPU6050"] = uniqueDevices[i].hasMPU6050;
-    deviceObj["connected"] = uniqueDevices[i].connected;
+    deviceObj["ip"] = devices[i].ip;
+    deviceObj["mac"] = devices[i].mac;
+    deviceObj["originalMac"] = devices[i].originalMac;
+    deviceObj["hostname"] = devices[i].hostname;
+    deviceObj["displayName"] = getDisplayName(devices[i].mac, devices[i].hostname);
+    deviceObj["rssi"] = devices[i].rssi;
+    deviceObj["ipFixed"] = devices[i].ipFixed;
+    deviceObj["hasMPU6050"] = devices[i].hasMPU6050;
+    deviceObj["connected"] = devices[i].connected;
     
-    if (uniqueDevices[i].hasMPU6050) {
-      deviceObj["pitch"] = uniqueDevices[i].pitch;
-      deviceObj["roll"] = uniqueDevices[i].roll;
-      deviceObj["yaw"] = uniqueDevices[i].yaw;
-      deviceObj["relPitch"] = uniqueDevices[i].relPitch;
-      deviceObj["relRoll"] = uniqueDevices[i].relRoll;
-      deviceObj["relYaw"] = uniqueDevices[i].relYaw;
+    if (devices[i].hasMPU6050) {
+      deviceObj["pitch"] = devices[i].pitch;
+      deviceObj["roll"] = devices[i].roll;
+      deviceObj["yaw"] = devices[i].yaw;
+      deviceObj["relPitch"] = devices[i].relPitch;
+      deviceObj["relRoll"] = devices[i].relRoll;
+      deviceObj["relYaw"] = devices[i].relYaw;
     }
   }
   
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
+  Serial.println("API response sent successfully");
 }
 
 // API для калибровки датчика
@@ -1358,6 +1504,107 @@ void handleApiRename() {
   }
 }
 
+// API для фиксации IP адреса
+void handleApiFixIP() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    String ip = server.arg("ip");
+    
+    Serial.printf("Fix IP request - MAC: %s, IP: %s\n", mac.c_str(), ip.c_str());
+    
+    if (mac.length() > 0 && ip.length() > 0) {
+      int ipNum = ip.toInt();
+      if (ipNum < 2 || ipNum > 254) {
+        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"IP must be between 2 and 254\"}");
+        return;
+      }
+      
+      // Формируем полный IP адрес
+      int subnet = atoi(networkSettings.subnet);
+      char fullIP[16];
+      snprintf(fullIP, sizeof(fullIP), "192.168.%d.%s", subnet, ip.c_str());
+      
+      // Ищем существующую запись
+      int fixedIndex = findFixedIPByMAC(mac.c_str());
+      
+      if (fixedIndex != -1) {
+        // Обновляем существующую запись
+        safeStrcpy(fixedIPs[fixedIndex].ip, fullIP, sizeof(fixedIPs[fixedIndex].ip));
+        Serial.printf("Updated fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
+      } else {
+        // Создаем новую запись
+        if (fixedIPCount < MAX_FIXED_IPS) {
+          safeStrcpy(fixedIPs[fixedIPCount].mac, mac.c_str(), sizeof(fixedIPs[fixedIPCount].mac));
+          safeStrcpy(fixedIPs[fixedIPCount].ip, fullIP, sizeof(fixedIPs[fixedIPCount].ip));
+          fixedIPCount++;
+          Serial.printf("Created new fixed IP for MAC %s: %s\n", mac.c_str(), fullIP);
+        } else {
+          server.send(507, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP limit reached\"}");
+          return;
+        }
+      }
+      
+      // Обновляем статус фиксации в устройствах
+      int deviceIndex = findDeviceByMAC(mac.c_str());
+      if (deviceIndex != -1) {
+        devices[deviceIndex].ipFixed = true;
+      }
+      
+      // Помечаем EEPROM как требующее сохранения
+      eepromDirty = true;
+      lastEEPROMSave = millis();
+      
+      server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address fixed. Device will get this IP on next connection.\"}");
+      
+    } else {
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
+// API для снятия фиксации IP адреса
+void handleApiUnfixIP() {
+  if (server.method() == HTTP_POST) {
+    String mac = server.arg("mac");
+    
+    Serial.printf("Unfix IP request - MAC: %s\n", mac.c_str());
+    
+    if (mac.length() > 0) {
+      // Ищем запись
+      int fixedIndex = findFixedIPByMAC(mac.c_str());
+      
+      if (fixedIndex != -1) {
+        // Удаляем запись (сдвигаем массив)
+        for (int i = fixedIndex; i < fixedIPCount - 1; i++) {
+          memcpy(&fixedIPs[i], &fixedIPs[i + 1], sizeof(FixedIP));
+        }
+        fixedIPCount--;
+        Serial.printf("Removed fixed IP for MAC %s\n", mac.c_str());
+        
+        // Обновляем статус фиксации в устройствах
+        int deviceIndex = findDeviceByMAC(mac.c_str());
+        if (deviceIndex != -1) {
+          devices[deviceIndex].ipFixed = false;
+        }
+        
+        // Помечаем EEPROM как требующее сохранения
+        eepromDirty = true;
+        lastEEPROMSave = millis();
+        
+        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"IP address unfixed\"}");
+      } else {
+        server.send(404, "application/json", "{\"status\":\"error\",\"message\":\"Fixed IP not found\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid parameters\"}");
+    }
+  } else {
+    server.send(405, "application/json", "{\"status\":\"error\",\"message\":\"Method not allowed\"}");
+  }
+}
+
 // API для сохранения настроек
 void handleApiSettings() {
   if (server.method() == HTTP_POST) {
@@ -1405,7 +1652,7 @@ void setup() {
   // Загрузка настроек сети из EEPROM
   loadNetworkSettingsFromEEPROM();
   
-  // Загрузка алиасов устройств из EEPROM
+  // Загрузка алиасов устройств и фиксированных IP из EEPROM
   loadAliasesFromEEPROM();
   
   // Настройка WiFi
@@ -1417,6 +1664,8 @@ void setup() {
   server.on("/api/calibrate", HTTP_POST, handleApiCalibrate);
   server.on("/api/reset", HTTP_POST, handleApiReset);
   server.on("/api/rename", HTTP_POST, handleApiRename);
+  server.on("/api/fixip", HTTP_POST, handleApiFixIP);
+  server.on("/api/unfixip", HTTP_POST, handleApiUnfixIP);
   server.on("/api/settings", HTTP_POST, handleApiSettings);
   
   // Запуск сервера
